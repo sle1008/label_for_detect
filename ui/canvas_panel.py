@@ -438,6 +438,13 @@ class AnnotationCanvas(tk.Canvas):
         if bbox.is_selected:
             outline_color = '#ffffff'
             line_width = BBOX_LINE_WIDTH_SELECTED
+            # Thin black stroke underneath so the white selection stays visible
+            # on light/white backgrounds.
+            self.create_rectangle(
+                cx1, cy1, cx2, cy2,
+                outline='#000000', width=line_width + 2,
+                tags=ANNOTATION_TAG,
+            )
         else:
             outline_color = class_color
             line_width = BBOX_LINE_WIDTH
