@@ -1,6 +1,17 @@
 __pycache__/
 *.py[cod]
+*.pyo
+
+# Build / distribution (exe)
 build/
 dist/
+*.exe
+*.spec.bak
+
+# IDE & local config
 .vscode/
 config.json
+
+# OS
+Thumbs.db
+Desktop.ini
