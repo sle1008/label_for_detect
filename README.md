@@ -25,7 +25,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Windows 下也可双击 `start.bat`（无控制台窗口启动）。
+Windows 下也可双击 `start.bat` 或 `start.vbs`（无控制台窗口启动）。
 
 可选参数：
 
