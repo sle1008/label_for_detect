@@ -182,6 +182,8 @@ class AnnotationApp(tk.Tk):
             on_image_selected=self._on_thumb_selected,
             path_formatter=self._format_image_path,
             on_context_menu=self._on_image_context_menu,
+            on_prev_image=self._prev_image,
+            on_next_image=self._next_image,
         )
         self._thumb_panel.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self._paned.add(

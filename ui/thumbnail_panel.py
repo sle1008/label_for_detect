@@ -100,12 +100,16 @@ class ThumbnailPanel(tk.Frame):
 
     def __init__(self, parent, on_image_selected: Callable[[int], None] = None,
                  path_formatter: Callable[[ImageItem], str] = None,
-                 on_context_menu: Callable[[int, object], None] = None):
+                 on_context_menu: Callable[[int, object], None] = None,
+                 on_prev_image: Callable[[], None] = None,
+                 on_next_image: Callable[[], None] = None):
         super().__init__(parent, bg=UI_SURFACE_BG, bd=0,
                          highlightthickness=1, highlightbackground=UI_BORDER)
 
         self._on_image_selected = on_image_selected
         self._on_context_menu = on_context_menu
+        self._on_prev_image = on_prev_image
+        self._on_next_image = on_next_image
 
         self._path_formatter = path_formatter or (lambda item: item.name)
 
@@ -166,9 +170,8 @@ class ThumbnailPanel(tk.Frame):
         self._list_frame.pack(fill='both', expand=True, padx=2, pady=(0, 4))
 
         self._list_frame.grid_rowconfigure(0, weight=1)
-
+        self._list_frame.grid_rowconfigure(1, weight=0)
         self._list_frame.grid_columnconfigure(0, weight=1)
-
         self._list_frame.grid_columnconfigure(1, weight=0, minsize=16)
 
 
@@ -206,12 +209,15 @@ class ThumbnailPanel(tk.Frame):
 
 
         self._v_scroll = ttk.Scrollbar(
-
             self._list_frame, orient='vertical', command=self._listbox.yview,
-
         )
-
-        self._listbox.config(yscrollcommand=self._on_yscroll)
+        self._h_scroll = ttk.Scrollbar(
+            self._list_frame, orient='horizontal', command=self._listbox.xview,
+        )
+        self._listbox.config(
+            yscrollcommand=self._on_yscroll,
+            xscrollcommand=self._on_xscroll,
+        )
 
 
 
@@ -224,12 +230,18 @@ class ThumbnailPanel(tk.Frame):
         self._listbox.bind('<Leave>', self._on_list_leave)
 
         self._listbox.bind('<MouseWheel>', self._on_mousewheel)
+        self._listbox.bind('<Left>', self._on_listbox_left)
+        self._listbox.bind('<Right>', self._on_listbox_right)
 
         self._listbox.bind('<Configure>', lambda e: self.after_idle(self._update_scrollbar))
 
         self._list_frame.bind('<Configure>', lambda e: self.after_idle(self._update_scrollbar))
 
 
+
+    def _on_xscroll(self, first, last):
+        self._h_scroll.set(first, last)
+        self.after_idle(self._update_scrollbar)
 
     def _on_yscroll(self, first, last):
 
@@ -248,14 +260,15 @@ class ThumbnailPanel(tk.Frame):
         if self._listbox.size() == 0:
 
             self._v_scroll.grid_remove()
+            self._h_scroll.grid_remove()
 
             return
 
         first, last = self._listbox.yview()
 
-        need = (float(last) - float(first)) < 0.999
+        need_v = (float(last) - float(first)) < 0.999
 
-        if need:
+        if need_v:
 
             self._v_scroll.grid(row=0, column=1, sticky='ns')
 
@@ -265,15 +278,46 @@ class ThumbnailPanel(tk.Frame):
 
             self._listbox.yview_moveto(0)
 
+        xfirst, xlast = self._listbox.xview()
+
+        need_h = (float(xlast) - float(xfirst)) < 0.999
+
+        if need_h:
+
+            self._h_scroll.grid(row=1, column=0, sticky='ew')
+
+        else:
+
+            self._h_scroll.grid_remove()
+
+            self._listbox.xview_moveto(0)
+
 
 
     def _on_mousewheel(self, event):
 
-        if not self._v_scroll.winfo_ismapped():
+        delta = -1 * (event.delta // 120)
 
+        if event.state & 0x1 and self._h_scroll.winfo_ismapped():
+            self._listbox.xview_scroll(delta, 'units')
             return
 
-        self._listbox.yview_scroll(-1 * (event.delta // 120), 'units')
+        if not self._v_scroll.winfo_ismapped():
+            return
+
+        self._listbox.yview_scroll(delta, 'units')
+
+    def _on_listbox_left(self, event=None):
+        """Prev image only — block Listbox default horizontal x-scroll."""
+        if self._on_prev_image:
+            self._on_prev_image()
+        return 'break'
+
+    def _on_listbox_right(self, event=None):
+        """Next image only — block Listbox default horizontal x-scroll."""
+        if self._on_next_image:
+            self._on_next_image()
+        return 'break'
 
 
 
