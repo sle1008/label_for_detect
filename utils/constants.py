@@ -24,8 +24,8 @@ LEFT_PANEL_WIDTH = LEFT_PANEL_ORIGINAL + 16  # reserve space for list scrollbar
 RIGHT_PANEL_WIDTH = int(RIGHT_PANEL_ORIGINAL * 1.25 * 1.2)  # +25% then +20% ≈ 495
 
 # BBox rendering (screen pixels, not scaled with zoom)
-BBOX_LINE_WIDTH = 4
-BBOX_LINE_WIDTH_SELECTED = 5
+BBOX_LINE_WIDTH = 3
+BBOX_LINE_WIDTH_SELECTED = 4
 BBOX_LABEL_FONT = ('Microsoft YaHei UI', 10)
 
 # Canvas settings
