@@ -11,7 +11,7 @@ from core.image_item import ImageItem
 from core.label_manager import LabelManager
 from utils.constants import (
     CANVAS_BG_COLOR, MIN_ZOOM, MAX_ZOOM, ZOOM_FACTOR,
-    MIN_BOX_SIZE, HANDLE_SIZE,
+    MIN_BOX_SIZE, HANDLE_SIZE, HANDLE_HIT_EXTRA,
     BBOX_LINE_WIDTH, BBOX_LINE_WIDTH_SELECTED,
     BBOX_LABEL_FONT, ZOOM_REDRAW_DELAY_MS,
     CANVAS_CROSSHAIR_COLOR, CANVAS_CROSSHAIR_WIDTH, CANVAS_CROSSHAIR_DASH,
@@ -1011,28 +1011,45 @@ class AnnotationCanvas(tk.Canvas):
         return min(candidates, key=_area)
     
     def _find_handle(self, canvas_x: float, canvas_y: float) -> Tuple[Optional[str], Optional[BBox]]:
-        """Find a resize handle at canvas coordinates."""
+        """Find a resize handle at canvas coordinates.
+
+        Hit area is slightly larger than the visible handle. For small boxes,
+        a handle only wins when the pointer is closer to that handle than to
+        the box center so the interior still shows the move cursor.
+        """
         if not self._current_image:
             return None, None
-        
-        hs = HANDLE_SIZE + 2  # Slightly larger hit area
-        
+
+        hit_r = HANDLE_SIZE + HANDLE_HIT_EXTRA
+        hit_r_sq = hit_r * hit_r
+        best: Tuple[Optional[str], Optional[BBox]] = (None, None)
+        best_dist_sq = hit_r_sq + 1
+
         for bbox in self._current_image.annotations:
             if not bbox.is_selected:
                 continue
-            
+
             cx1, cy1 = self.image_to_canvas(bbox.x1, bbox.y1)
             cx2, cy2 = self.image_to_canvas(bbox.x2, bbox.y2)
-            
+            center_x = (cx1 + cx2) / 2
+            center_y = (cy1 + cy2) / 2
+            center_dist_sq = (canvas_x - center_x) ** 2 + (canvas_y - center_y) ** 2
+
             positions = {
                 'nw': (cx1, cy1), 'ne': (cx2, cy1),
                 'sw': (cx1, cy2), 'se': (cx2, cy2),
-                'n': ((cx1+cx2)/2, cy1), 's': ((cx1+cx2)/2, cy2),
-                'w': (cx1, (cy1+cy2)/2), 'e': (cx2, (cy1+cy2)/2)
+                'n': ((cx1 + cx2) / 2, cy1), 's': ((cx1 + cx2) / 2, cy2),
+                'w': (cx1, (cy1 + cy2) / 2), 'e': (cx2, (cy1 + cy2) / 2),
             }
-            
+
             for handle_name, (hx, hy) in positions.items():
-                if abs(canvas_x - hx) <= hs and abs(canvas_y - hy) <= hs:
-                    return handle_name, bbox
-        
-        return None, None
+                handle_dist_sq = (canvas_x - hx) ** 2 + (canvas_y - hy) ** 2
+                if handle_dist_sq > hit_r_sq:
+                    continue
+                if handle_dist_sq >= center_dist_sq:
+                    continue
+                if handle_dist_sq < best_dist_sq:
+                    best_dist_sq = handle_dist_sq
+                    best = (handle_name, bbox)
+
+        return best
