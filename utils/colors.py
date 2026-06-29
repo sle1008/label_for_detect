@@ -1,9 +1,9 @@
 """Color management for label classes."""
 
 
-# 24 strong, distinct colors. All are deep enough to stay readable as text and
+# 36 strong, distinct colors. All are deep enough to stay readable as text and
 # box outlines on a light background (no faded pastels). Colors repeat in a
-# cycle once there are more than 24 classes.
+# cycle once there are more than 36 classes.
 LABEL_PALETTE = [
     '#e6194b',  # red
     '#f58231',  # orange
@@ -29,6 +29,18 @@ LABEL_PALETTE = [
     '#800000',  # maroon
     '#5d4037',  # taupe
     '#525252',  # dark gray
+    '#c62828',  # crimson
+    '#ef6c00',  # vivid orange
+    '#689f38',  # olive green
+    '#00695c',  # dark teal
+    '#0277bd',  # cerulean blue
+    '#283593',  # indigo blue
+    '#4527a0',  # blue violet
+    '#7b1fa2',  # medium purple
+    '#880e4f',  # plum
+    '#4e342e',  # espresso brown
+    '#455a64',  # blue gray
+    '#1565c0',  # royal blue
 ]
 
 

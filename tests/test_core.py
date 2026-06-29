@@ -272,9 +272,9 @@ class PathDisplayTests(unittest.TestCase):
 
 
 class LabelColorTests(unittest.TestCase):
-    def test_palette_has_24_colors(self):
+    def test_palette_has_36_colors(self):
         from utils.colors import LABEL_PALETTE
-        self.assertEqual(len(LABEL_PALETTE), 24)
+        self.assertEqual(len(LABEL_PALETTE), 36)
 
     def test_colors_cycle_after_palette_length(self):
         from utils.colors import get_color_for_class, LABEL_PALETTE
