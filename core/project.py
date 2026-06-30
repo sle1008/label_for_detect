@@ -187,6 +187,36 @@ class Project:
 
         return self.current_index
     
+    @staticmethod
+    def resolve_refresh_index(
+        new_paths: List[Path],
+        prior_paths: List[Path],
+        current_path: Optional[Path],
+        current_index: int,
+    ) -> int:
+        """Pick the image index to show after refreshing an open directory.
+
+        Keeps the same file when it still exists; otherwise the nearest prior
+        image in the previous sorted order; otherwise 0.
+        """
+        if not new_paths:
+            return -1
+
+        if current_path is not None:
+            current_resolved = current_path.resolve()
+            for i, path in enumerate(new_paths):
+                if path.resolve() == current_resolved:
+                    return i
+
+        if prior_paths and 0 <= current_index < len(prior_paths):
+            for j in range(current_index - 1, -1, -1):
+                prev_resolved = prior_paths[j].resolve()
+                for i, path in enumerate(new_paths):
+                    if path.resolve() == prev_resolved:
+                        return i
+
+        return 0
+
     def clear(self):
         """Clear the project."""
         self.image_list.clear()

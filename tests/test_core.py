@@ -173,6 +173,25 @@ class ProjectFilterTests(unittest.TestCase):
         self.assertEqual(project.current_index, 1)
         self.assertEqual(project.image_list[1].name, '2.jpg')
 
+    def test_resolve_refresh_index_keeps_current(self):
+        paths = [Path('a.jpg'), Path('b.jpg'), Path('c.jpg')]
+        idx = Project.resolve_refresh_index(
+            paths, paths, Path('b.jpg'), 1,
+        )
+        self.assertEqual(idx, 1)
+
+    def test_resolve_refresh_index_falls_back_to_prior(self):
+        prior = [Path('a.jpg'), Path('b.jpg'), Path('c.jpg')]
+        new_paths = [Path('a.jpg'), Path('c.jpg')]
+        idx = Project.resolve_refresh_index(
+            new_paths, prior, Path('b.jpg'), 1,
+        )
+        self.assertEqual(idx, 0)
+
+    def test_resolve_refresh_index_empty(self):
+        idx = Project.resolve_refresh_index([], [Path('a.jpg')], Path('a.jpg'), 0)
+        self.assertEqual(idx, -1)
+
 
 class AnnotationStatusTests(unittest.TestCase):
     def test_detects_label_file_without_loading_image(self):

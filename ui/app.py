@@ -85,6 +85,7 @@ class AnnotationApp(tk.Tk):
         self._restore_image_index = 0
         self._main_thread_queue = queue.Queue()
         self._filter_status_snapshot = {}
+        self._pending_refresh = None
         
         # Apply saved geometry
         if self._config.window_geometry:
@@ -255,6 +256,7 @@ class AnnotationApp(tk.Tk):
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label='打开目录...', command=self._open_directory, accelerator='Ctrl+O')
+        file_menu.add_command(label='刷新目录', command=self._refresh_directory)
         file_menu.add_command(label='加载标签...', command=self._load_label_file)
         file_menu.add_command(label='加载预标注权重...', command=self._load_weights)
         file_menu.add_separator()
@@ -791,21 +793,49 @@ class AnnotationApp(tk.Tk):
         d = filedialog.askdirectory(initialdir=initial, title='选择图片目录', parent=self)
         if d:
             self._load_directory(d)
+
+    def _refresh_directory(self):
+        """Rescan the open directory, clear decode cache, and keep the current image."""
+        if not self._project.image_dir:
+            showwarning(self, '提示', '请先打开一个目录')
+            return
+
+        dir_path = self._project.image_dir
+        if not dir_path.is_dir():
+            showerror(self, '错误', f'目录不存在或无法访问:\n{dir_path}')
+            return
+
+        current = self._project.current_image
+        self._pending_refresh = {
+            'prior_paths': [item.path for item in self._project.image_list],
+            'current_path': current.path if current else None,
+            'current_index': self._project.current_index,
+        }
+        self._load_directory(str(dir_path), from_refresh=True)
     
-    def _load_directory(self, dir_path: str):
+    def _load_directory(self, dir_path: str, from_refresh: bool = False):
         """Load images from directory without blocking the UI."""
         import threading
         
-        self._status_bar.info(f'正在扫描目录: {dir_path}')
+        self._status_bar.info(
+            f'正在刷新目录: {dir_path}' if from_refresh else f'正在扫描目录: {dir_path}'
+        )
         self.update_idletasks()
         
         self._save_current_annotations()
+        if from_refresh:
+            self._save_manual_statuses()
         self._image_loader.clear_cache()
         
-        # Keep restore hints from config before this load overwrites session fields
-        self._restore_dir_path = self._config.last_directory
-        self._restore_image_path = self._config.last_image_path
-        self._restore_image_index = self._config.last_image_index
+        if not from_refresh:
+            # Keep restore hints from config before this load overwrites session fields
+            self._restore_dir_path = self._config.last_directory
+            self._restore_image_path = self._config.last_image_path
+            self._restore_image_index = self._config.last_image_index
+        else:
+            self._restore_dir_path = ''
+            self._restore_image_path = ''
+            self._restore_image_index = -1
         
         self._scan_generation += 1
         scan_gen = self._scan_generation
@@ -815,6 +845,8 @@ class AnnotationApp(tk.Tk):
         self._project.current_index = -1
         self._thumb_panel.clear()
         
+        pending_refresh = self._pending_refresh if from_refresh else None
+
         def _bg_scan():
             try:
                 paths = Project.scan_image_paths(dir_path)
@@ -823,7 +855,19 @@ class AnnotationApp(tk.Tk):
                 return
             
             preloaded = None
-            preload_path = self._resolve_preload_path(dir_path, paths)
+            preload_path = None
+            if pending_refresh:
+                target_idx = Project.resolve_refresh_index(
+                    paths,
+                    pending_refresh['prior_paths'],
+                    pending_refresh['current_path'],
+                    pending_refresh['current_index'],
+                )
+                if 0 <= target_idx < len(paths):
+                    preload_path = paths[target_idx]
+            else:
+                preload_path = self._resolve_preload_path(dir_path, paths)
+
             if preload_path:
                 preloaded = ImageItem(path=preload_path)
                 if self._image_loader.load_image_sync(preloaded):
@@ -882,6 +926,9 @@ class AnnotationApp(tk.Tk):
         count = self._project.set_image_paths(dir_path, paths)
         self._apply_manual_statuses(dir_path)
         self._filter_status_snapshot.clear()
+
+        pending_refresh = self._pending_refresh
+        self._pending_refresh = None
         
         if count > 0:
             if preloaded and preloaded.is_loaded:
@@ -889,16 +936,30 @@ class AnnotationApp(tk.Tk):
             
             self._thumb_panel.set_images(self._project.image_list)
             self._config.last_directory = dir_path
-            self._config.add_recent_dir(dir_path)
+            if not pending_refresh:
+                self._config.add_recent_dir(dir_path)
             
-            restore_idx = self._resolve_last_image_index(dir_path)
+            if pending_refresh:
+                restore_idx = Project.resolve_refresh_index(
+                    paths,
+                    pending_refresh['prior_paths'],
+                    pending_refresh['current_path'],
+                    pending_refresh['current_index'],
+                )
+                msg_prefix = '刷新完成'
+            else:
+                restore_idx = self._resolve_last_image_index(dir_path)
+                msg_prefix = '扫描完成'
+
             if restore_idx > 0:
                 self._project.goto_image(restore_idx)
                 self._status_bar.info(
-                    f'扫描完成: {count} 张图片，正在恢复上次位置 ({restore_idx + 1}/{count})...'
+                    f'{msg_prefix}: {count} 张图片，正在恢复位置 ({restore_idx + 1}/{count})...'
                 )
             else:
-                self._status_bar.info(f'扫描完成: {count} 张图片，正在加载第一张...')
+                self._status_bar.info(
+                    f'{msg_prefix}: {count} 张图片，正在加载{"当前" if pending_refresh else "第一"}张...'
+                )
             self._refresh_image_list_view(jump='keep', navigate=False)
             self._show_current_image_async()
             self.after(300, lambda: self._preload_window_async(self._project.current_index))
