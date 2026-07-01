@@ -29,6 +29,9 @@ class AppConfig:
     box_list_column_widths: Dict[str, int] = field(default_factory=lambda: {
         'id': 30, 'class': 80, 'conf': 50, 'coords': 120,
     })
+    left_panel_width: int = 0  # 0 = use LEFT_PANEL_WIDTH default at runtime
+    right_panel_width: int = 0  # 0 = use RIGHT_PANEL_WIDTH default at runtime
+    right_pane_sash_positions: List[int] = field(default_factory=list)
     
     def add_recent_dir(self, dir_path: str):
         """Add a directory to recent list (max 10)."""

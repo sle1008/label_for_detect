@@ -6,7 +6,7 @@ import queue
 import tkinter as tk
 from tkinter import ttk, filedialog
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -176,10 +176,11 @@ class AnnotationApp(tk.Tk):
         )
         self._paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         
-        left_wrap = tk.Frame(self._paned, width=LEFT_PANEL_WIDTH, bg=UI_BG_COLOR)
-        left_wrap.pack_propagate(False)
+        left_w = self._saved_left_panel_width()
+        self._left_wrap = tk.Frame(self._paned, width=left_w, bg=UI_BG_COLOR)
+        self._left_wrap.pack_propagate(False)
         self._thumb_panel = ThumbnailPanel(
-            left_wrap,
+            self._left_wrap,
             on_image_selected=self._on_thumb_selected,
             path_formatter=self._format_image_path,
             on_context_menu=self._on_image_context_menu,
@@ -188,8 +189,8 @@ class AnnotationApp(tk.Tk):
         )
         self._thumb_panel.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self._paned.add(
-            left_wrap, minsize=LEFT_PANEL_WIDTH,
-            width=LEFT_PANEL_WIDTH, stretch='never',
+            self._left_wrap, minsize=LEFT_PANEL_WIDTH,
+            width=left_w, stretch='never',
         )
         
         # Center: Canvas
@@ -206,33 +207,34 @@ class AnnotationApp(tk.Tk):
         self._canvas.set_image_context_menu_handler(self._on_canvas_image_context_menu)
         self._paned.add(self._canvas, minsize=400, stretch='always')
         
-        right_wrap = tk.Frame(self._paned, width=RIGHT_PANEL_WIDTH, bg=UI_BG_COLOR)
-        right_wrap.pack_propagate(False)
+        right_w = self._saved_right_panel_width()
+        self._right_wrap = tk.Frame(self._paned, width=right_w, bg=UI_BG_COLOR)
+        self._right_wrap.pack_propagate(False)
         
-        self._right_paned = ttk.PanedWindow(right_wrap, orient='vertical')
+        self._right_paned = ttk.PanedWindow(self._right_wrap, orient='vertical')
         self._right_paned.pack(fill='both', expand=True, padx=2, pady=2)
         
         # Top: label categories (weight 6)
-        label_pane = ttk.Frame(self._right_paned)
+        self._label_pane = ttk.Frame(self._right_paned)
         self._label_panel = LabelPanel(
-            label_pane, self._label_manager,
+            self._label_pane, self._label_manager,
             on_class_selected=self._on_class_selected,
             on_sort_mode_changed=self._on_label_sort_changed,
             default_export_path=self._default_label_export_path,
             on_labels_exported=self._on_labels_file_exported,
         )
         self._label_panel.pack(fill='both', expand=True)
-        self._right_paned.add(label_pane, weight=70)
+        self._right_paned.add(self._label_pane, weight=70)
         
         # Middle: threshold slider (weight 0.4)
-        threshold_pane = tk.Frame(self._right_paned, bg=UI_BG_COLOR, height=58)
-        threshold_pane.pack_propagate(False)
+        self._threshold_pane = tk.Frame(self._right_paned, bg=UI_BG_COLOR, height=58)
+        self._threshold_pane.pack_propagate(False)
         self._threshold_slider = ThresholdSlider(
-            threshold_pane, value=self._threshold,
+            self._threshold_pane, value=self._threshold,
             command=self._on_threshold_changed
         )
         self._threshold_slider.pack(fill='x', padx=4, pady=6)
-        self._right_paned.add(threshold_pane, weight=4)
+        self._right_paned.add(self._threshold_pane, weight=4)
         
         # Bottom: annotation list (weight 3.5)
         self._box_list_panel = BoxListPanel(
@@ -245,9 +247,117 @@ class AnnotationApp(tk.Tk):
         self._right_paned.add(self._box_list_panel, weight=26)
         
         self._paned.add(
-            right_wrap, minsize=RIGHT_PANEL_WIDTH,
-            width=RIGHT_PANEL_WIDTH, stretch='never',
+            self._right_wrap, minsize=RIGHT_PANEL_WIDTH,
+            width=right_w, stretch='never',
         )
+        self._paned.bind('<ButtonRelease-1>', self._on_main_paned_sash_release)
+        self._right_paned.bind('<ButtonRelease-1>', self._on_right_paned_sash_release)
+        self.after_idle(self._apply_saved_pane_layout)
+    
+    def _saved_left_panel_width(self) -> int:
+        width = int(getattr(self._config, 'left_panel_width', 0) or 0)
+        if width < LEFT_PANEL_WIDTH:
+            return LEFT_PANEL_WIDTH
+        return width
+
+    def _saved_right_panel_width(self) -> int:
+        width = int(getattr(self._config, 'right_panel_width', 0) or 0)
+        if width < RIGHT_PANEL_WIDTH:
+            return RIGHT_PANEL_WIDTH
+        return width
+
+    def _main_paned_sash_width(self) -> int:
+        return int(self._paned.cget('sashwidth')) + 2 * int(self._paned.cget('sashpad') or 0)
+
+    def _current_left_panel_width(self) -> int:
+        try:
+            return max(LEFT_PANEL_WIDTH, int(self._paned.sashpos(0)))
+        except tk.TclError:
+            return self._saved_left_panel_width()
+
+    def _current_right_panel_width(self) -> int:
+        try:
+            total = max(1, self._paned.winfo_width())
+            pos = int(self._paned.sashpos(1))
+            width = total - pos - self._main_paned_sash_width()
+            return max(RIGHT_PANEL_WIDTH, width)
+        except tk.TclError:
+            return self._saved_right_panel_width()
+
+    def _current_right_pane_sash_positions(self) -> List[int]:
+        try:
+            return [int(self._right_paned.sashpos(0)), int(self._right_paned.sashpos(1))]
+        except tk.TclError:
+            return []
+
+    def _apply_saved_pane_layout(self):
+        """Restore main horizontal and right vertical splitter positions."""
+        if not self._paned.winfo_ismapped():
+            self.after(50, self._apply_saved_pane_layout)
+            return
+
+        left_w = self._saved_left_panel_width()
+        right_w = self._saved_right_panel_width()
+        try:
+            self._paned.sashpos(0, left_w)
+            self._left_wrap.config(width=left_w)
+
+            total = self._paned.winfo_width()
+            if total > 1:
+                sash_extra = self._main_paned_sash_width()
+                center_min = 400
+                pos1 = total - right_w - sash_extra
+                pos1 = min(pos1, total - center_min - sash_extra)
+                pos1 = max(left_w + center_min + sash_extra, pos1)
+                self._paned.sashpos(1, pos1)
+                self._right_wrap.config(width=right_w)
+        except tk.TclError:
+            pass
+
+        positions = list(getattr(self._config, 'right_pane_sash_positions', None) or [])
+        if len(positions) < 2:
+            return
+        if not self._right_paned.winfo_ismapped():
+            self.after(50, self._apply_saved_pane_layout)
+            return
+
+        total_h = self._right_paned.winfo_height()
+        if total_h <= 1:
+            self.after(50, self._apply_saved_pane_layout)
+            return
+
+        min_label, min_threshold, min_box = 100, 52, 100
+        y0 = max(min_label, min(int(positions[0]), total_h - min_threshold - min_box))
+        y1 = max(y0 + min_threshold, min(int(positions[1]), total_h - min_box))
+        try:
+            self._right_paned.sashpos(0, y0)
+            self._right_paned.sashpos(1, y1)
+        except tk.TclError:
+            pass
+
+    def _persist_pane_layout(self):
+        left = self._current_left_panel_width()
+        right = self._current_right_panel_width()
+        sashes = self._current_right_pane_sash_positions()
+        changed = False
+
+        if left != self._config.left_panel_width:
+            self._config.left_panel_width = left
+            changed = True
+        if right != self._config.right_panel_width:
+            self._config.right_panel_width = right
+            changed = True
+        if sashes and sashes != list(self._config.right_pane_sash_positions or []):
+            self._config.right_pane_sash_positions = sashes
+            changed = True
+        if changed:
+            self._config_manager.save(self._config)
+
+    def _on_main_paned_sash_release(self, event=None):
+        self._persist_pane_layout()
+
+    def _on_right_paned_sash_release(self, event=None):
+        self._persist_pane_layout()
     
     def _setup_menus(self):
         """Setup menu bar."""
@@ -669,6 +779,11 @@ class AnnotationApp(tk.Tk):
         
         self._config.label_sort_by_name = self._label_manager.sort_by_name
         self._config.box_list_column_widths = dict(self._box_list_panel.get_column_widths())
+        self._config.left_panel_width = self._current_left_panel_width()
+        self._config.right_panel_width = self._current_right_panel_width()
+        sashes = self._current_right_pane_sash_positions()
+        if sashes:
+            self._config.right_pane_sash_positions = sashes
         self._config.image_filter = self._project.image_filter.value
         
         self._config_manager.save(self._config)
