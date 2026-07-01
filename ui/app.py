@@ -86,6 +86,8 @@ class AnnotationApp(tk.Tk):
         self._main_thread_queue = queue.Queue()
         self._filter_status_snapshot = {}
         self._pending_refresh = None
+        self._pane_layout_after_id = None
+        self._pane_layout_retry_count = 0
         
         # Apply saved geometry
         if self._config.window_geometry:
@@ -254,6 +256,29 @@ class AnnotationApp(tk.Tk):
         self._right_paned.bind('<ButtonRelease-1>', self._on_right_paned_sash_release)
         self.after_idle(self._apply_saved_pane_layout)
     
+    def _main_pane_sash_x(self, index: int) -> int:
+        """Horizontal tk.PanedWindow uses sash_coord/sash_place, not sashpos."""
+        return int(self._paned.sash_coord(index)[0])
+
+    def _set_main_pane_sash_x(self, index: int, x: int):
+        sx, sy = self._paned.sash_coord(index)
+        self._paned.sash_place(index, int(x), sy)
+
+    def _cancel_pane_layout_apply(self):
+        if self._pane_layout_after_id is not None:
+            try:
+                self.after_cancel(self._pane_layout_after_id)
+            except tk.TclError:
+                pass
+            self._pane_layout_after_id = None
+
+    def _schedule_pane_layout_retry(self):
+        if self._pane_layout_retry_count >= 40:
+            return
+        self._pane_layout_retry_count += 1
+        self._cancel_pane_layout_apply()
+        self._pane_layout_after_id = self.after(50, self._apply_saved_pane_layout)
+
     def _saved_left_panel_width(self) -> int:
         width = int(getattr(self._config, 'left_panel_width', 0) or 0)
         if width < LEFT_PANEL_WIDTH:
@@ -271,17 +296,17 @@ class AnnotationApp(tk.Tk):
 
     def _current_left_panel_width(self) -> int:
         try:
-            return max(LEFT_PANEL_WIDTH, int(self._paned.sashpos(0)))
-        except tk.TclError:
+            return max(LEFT_PANEL_WIDTH, self._main_pane_sash_x(0))
+        except (tk.TclError, AttributeError, IndexError):
             return self._saved_left_panel_width()
 
     def _current_right_panel_width(self) -> int:
         try:
             total = max(1, self._paned.winfo_width())
-            pos = int(self._paned.sashpos(1))
+            pos = self._main_pane_sash_x(1)
             width = total - pos - self._main_paned_sash_width()
             return max(RIGHT_PANEL_WIDTH, width)
-        except tk.TclError:
+        except (tk.TclError, AttributeError, IndexError):
             return self._saved_right_panel_width()
 
     def _current_right_pane_sash_positions(self) -> List[int]:
@@ -292,14 +317,15 @@ class AnnotationApp(tk.Tk):
 
     def _apply_saved_pane_layout(self):
         """Restore main horizontal and right vertical splitter positions."""
+        self._pane_layout_after_id = None
         if not self._paned.winfo_ismapped():
-            self.after(50, self._apply_saved_pane_layout)
+            self._schedule_pane_layout_retry()
             return
 
         left_w = self._saved_left_panel_width()
         right_w = self._saved_right_panel_width()
         try:
-            self._paned.sashpos(0, left_w)
+            self._set_main_pane_sash_x(0, left_w)
             self._left_wrap.config(width=left_w)
 
             total = self._paned.winfo_width()
@@ -309,21 +335,22 @@ class AnnotationApp(tk.Tk):
                 pos1 = total - right_w - sash_extra
                 pos1 = min(pos1, total - center_min - sash_extra)
                 pos1 = max(left_w + center_min + sash_extra, pos1)
-                self._paned.sashpos(1, pos1)
+                self._set_main_pane_sash_x(1, pos1)
                 self._right_wrap.config(width=right_w)
-        except tk.TclError:
+        except (tk.TclError, AttributeError, IndexError):
             pass
 
         positions = list(getattr(self._config, 'right_pane_sash_positions', None) or [])
         if len(positions) < 2:
+            self._pane_layout_retry_count = 0
             return
         if not self._right_paned.winfo_ismapped():
-            self.after(50, self._apply_saved_pane_layout)
+            self._schedule_pane_layout_retry()
             return
 
         total_h = self._right_paned.winfo_height()
         if total_h <= 1:
-            self.after(50, self._apply_saved_pane_layout)
+            self._schedule_pane_layout_retry()
             return
 
         min_label, min_threshold, min_box = 100, 52, 100
@@ -334,6 +361,7 @@ class AnnotationApp(tk.Tk):
             self._right_paned.sashpos(1, y1)
         except tk.TclError:
             pass
+        self._pane_layout_retry_count = 0
 
     def _persist_pane_layout(self):
         left = self._current_left_panel_width()
@@ -2196,14 +2224,18 @@ Escape      取消绘制 / 取消选中
     
     def _on_close(self):
         """Handle window close."""
-        self._save_current_annotations()
-        self._save_manual_statuses()
-        self._persist_current_position()
-        self._save_session()
-        
+        self._cancel_pane_layout_apply()
+        try:
+            self._save_current_annotations()
+            self._save_manual_statuses()
+            self._persist_current_position()
+            self._save_session()
+        except Exception:
+            pass
+
         for item in self._project.image_list:
             item._pil_image = None
             item.is_loaded = False
-        
+
         self._image_loader.shutdown()
         self.destroy()
