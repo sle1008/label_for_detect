@@ -661,6 +661,11 @@ class AnnotationApp(tk.Tk):
             self._box_list_panel.refresh()
             self._on_annotation_changed()
         self._status_bar.set_info(msg)
+        if category in (IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED):
+            self._mark_real_annotation_change(item)
+            self._save_manual_statuses()
+            if full_index == self._project.current_index:
+                self._status_bar.set_info(self._compose_status_text(item))
 
     def _on_label_search_shortcut(self, event=None):
         """Press S with selection to jump to label search."""
@@ -945,6 +950,17 @@ class AnnotationApp(tk.Tk):
         if persist_session:
             self._save_manual_statuses()
             self._save_session()
+
+    def _mark_real_annotation_change(self, item: ImageItem):
+        """Mark an item as having real content changes.
+
+        This is intentionally narrower than selection-only UI changes: it is
+        used when boxes are added/removed/edited or when image-level category
+        changes happen, so an 'uncertain' item can be promoted only after an
+        actual change.
+        """
+        if item and item.manual_annotation_status == IMAGE_CATEGORY_UNCERTAIN:
+            item.manual_annotation_status = None
     
     # --- File operations ---
     
@@ -1710,6 +1726,9 @@ class AnnotationApp(tk.Tk):
             selected = item.get_selected_annotations()
             if len(selected) == 1:
                 self._label_panel.highlight_class(selected[0].class_id)
+            if item.manual_annotation_status == IMAGE_CATEGORY_UNCERTAIN and item.is_dirty:
+                item.manual_annotation_status = None
+                self._save_manual_statuses()
             self._box_list_panel.refresh()
             self._status_bar.set_info(self._compose_status_text(item))
             if self._project.image_filter != ImageFilter.ALL:
@@ -1755,6 +1774,7 @@ class AnnotationApp(tk.Tk):
             self._canvas.refresh()
             self._on_annotation_changed()
         
+        self._mark_real_annotation_change(item)
         cmd = Command(
             description=f'添加标注框 [{new_bbox.class_name}]',
             execute=execute, undo=undo
@@ -1786,6 +1806,7 @@ class AnnotationApp(tk.Tk):
             self._canvas.refresh()
             self._on_annotation_changed()
         
+        self._mark_real_annotation_change(item)
         cmd = Command(description=description, execute=execute, undo=undo)
         self._current_image_undo_manager().record(cmd)
         self._on_annotation_changed()
@@ -1856,6 +1877,7 @@ class AnnotationApp(tk.Tk):
             self._box_list_panel.refresh()
             self._on_annotation_changed()
         
+        self._mark_real_annotation_change(item)
         cmd = Command(
             description=f'修改类别为 [{class_id}] {class_name}',
             execute=execute, undo=undo,
@@ -1929,6 +1951,7 @@ class AnnotationApp(tk.Tk):
             self._canvas.refresh()
             self._on_annotation_changed()
         
+        self._mark_real_annotation_change(item)
         cmd = Command(
             description=f'删除 {len(selected)} 个标注框',
             execute=execute, undo=undo
@@ -2134,6 +2157,7 @@ class AnnotationApp(tk.Tk):
                     self._canvas.refresh()
                     self._on_annotation_changed()
                 
+                self._mark_real_annotation_change(item)
                 cmd = Command(
                     description=f'预标注 {count} 个框',
                     execute=execute, undo=undo,
@@ -2312,9 +2336,11 @@ class AnnotationApp(tk.Tk):
             item.annotations = annotations
             item._annotations_loaded = True
             item.mark_dirty()
+            self._mark_real_annotation_change(item)
             self._canvas.refresh()
             self._box_list_panel.set_image(item)
             self._on_annotation_changed()
+            self._save_manual_statuses()
             self._status_bar.set_info(f'加载了 {len(annotations)} 个已有标注')
         else:
             self._status_bar.set_info('未找到已有标注文件')
