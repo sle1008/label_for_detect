@@ -341,15 +341,15 @@ class ThumbnailPanel(tk.Frame):
 
         self._filter_hint = filter_hint
 
-        self._listbox.delete(0, 'end')
+        self._suppress_select = True
+        try:
+            self._listbox.delete(0, 'end')
 
-
-
-        if image_list:
-
-            self._listbox.insert('end', *[item.name for item in image_list])
-
-            self._refresh_row_styles()
+            if image_list:
+                self._listbox.insert('end', *[item.name for item in image_list])
+                self._refresh_row_styles()
+        finally:
+            self._suppress_select = False
 
 
 

@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from core.image_item import ImageItem
-from io_ops.annotation_status import get_image_category, is_image_annotated
+from io_ops.annotation_status import (
+    get_image_category, is_image_annotated,
+    IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED,
+)
 from utils.constants import IMAGE_EXTENSIONS
 
 
@@ -82,20 +85,40 @@ class Project:
     def invalidate_filter_cache(self):
         self._filtered_indices_cache = None
 
+    def lingers_in_unannotated_while_editing(self, index: int, item: ImageItem) -> bool:
+        """Keep the current image in the unannotated filter while it is being edited."""
+        if self.image_filter != ImageFilter.UNANNOTATED:
+            return False
+        if index != self.current_index:
+            return False
+        if get_image_category(item) != IMAGE_CATEGORY_ANNOTATED:
+            return False
+        return item.annotation_count() > 0
+
+    def matches_image_filter(self, index: int, item: ImageItem) -> bool:
+        category = get_image_category(item)
+        if category == self.image_filter.value:
+            return True
+        return self.lingers_in_unannotated_while_editing(index, item)
+
     def get_filtered_indices(self) -> List[int]:
         """Indices into image_list that match the active filter, in original order."""
         if self.image_filter == ImageFilter.ALL:
             return list(range(len(self.image_list)))
 
-        if self._filtered_indices_cache is not None:
+        # Unannotated filter keeps the current image while editing; skip cache.
+        if (
+            self._filtered_indices_cache is not None
+            and self.image_filter != ImageFilter.UNANNOTATED
+        ):
             return self._filtered_indices_cache
 
         indices: List[int] = []
         for i, item in enumerate(self.image_list):
-            category = get_image_category(item)
-            if category == self.image_filter.value:
+            if self.matches_image_filter(i, item):
                 indices.append(i)
-        self._filtered_indices_cache = indices
+        if self.image_filter != ImageFilter.UNANNOTATED:
+            self._filtered_indices_cache = indices
         return indices
 
     def _visible_indices(self) -> List[int]:
@@ -167,6 +190,13 @@ class Project:
     def annotated_image_count(self) -> int:
         """Get count of images with at least one annotation."""
         return sum(1 for img in self.image_list if is_image_annotated(img))
+
+    def next_filtered_index_after(self, full_index: int) -> Optional[int]:
+        """Return the next filtered image index after full_index in sort order."""
+        for idx in self.get_filtered_indices():
+            if idx > full_index:
+                return idx
+        return None
 
     def remove_image_at(self, index: int) -> int:
         """Remove an image from the list. Returns the new current_index."""

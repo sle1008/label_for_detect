@@ -150,6 +150,40 @@ class ProjectFilterTests(unittest.TestCase):
             self.assertTrue(project.prev_image())
             self.assertEqual(project.current_index, 0)
 
+    def test_next_filtered_index_after(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('a.jpg', 'b.jpg', 'c.jpg', 'd.jpg'):
+                (root / name).write_bytes(b'x')
+            (root / 'a.txt').write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+            (root / 'c.txt').write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root), Project.scan_image_paths(str(root)))
+            project.image_filter = ImageFilter.ANNOTATED
+
+            self.assertEqual(project.next_filtered_index_after(0), 2)
+            self.assertIsNone(project.next_filtered_index_after(2))
+
+    def test_unannotated_keeps_current_image_while_editing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('a.jpg', 'b.jpg', 'c.jpg'):
+                (root / name).write_bytes(b'x')
+
+            project = Project()
+            project.set_image_paths(str(root), Project.scan_image_paths(str(root)))
+            project.image_filter = ImageFilter.UNANNOTATED
+            project.goto_image(1)
+            item = project.image_list[1]
+            from core.annotation import BBox
+            item.add_annotation(BBox(class_id=0, class_name='deer', x1=10, y1=10, x2=50, y2=50))
+
+            self.assertEqual(project.get_filtered_indices(), [0, 1, 2])
+
+            project.goto_image(2)
+            self.assertEqual(project.get_filtered_indices(), [0, 2])
+
     def test_filter_cache_reuses_indices(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
