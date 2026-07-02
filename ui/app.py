@@ -74,6 +74,8 @@ class AnnotationApp(tk.Tk):
         self._project = Project()
         self._label_manager = LabelManager()
         self._undo_manager = UndoRedoManager()
+        self._image_undo_managers = {}
+        self._navigation_undo_stack = []
         self._config_manager = ConfigManager()
         self._config = self._config_manager.load()
         self._image_loader = AsyncImageLoader()
@@ -920,12 +922,29 @@ class AnnotationApp(tk.Tk):
         
         threading.Thread(target=bg, daemon=True).start()
     
-    def _save_before_navigate(self):
-        """Save annotations and session when leaving current image."""
+    def _current_image_undo_manager(self) -> UndoRedoManager:
+        item = self._project.current_image
+        if not item:
+            return self._undo_manager
+        key = id(item)
+        manager = self._image_undo_managers.get(key)
+        if manager is None:
+            manager = UndoRedoManager()
+            self._image_undo_managers[key] = manager
+        return manager
+
+    def _save_before_navigate(self, persist_session: bool = False):
+        """Save annotations before leaving current image.
+
+        Keep routine image navigation lightweight: annotation files are saved
+        immediately, while config/manual-status persistence is deferred to
+        explicit save, filter changes, directory changes, and app close.
+        """
         self._save_current_annotations()
-        self._save_manual_statuses()
         self._persist_current_position()
-        self._save_session()
+        if persist_session:
+            self._save_manual_statuses()
+            self._save_session()
     
     # --- File operations ---
     
@@ -1068,6 +1087,8 @@ class AnnotationApp(tk.Tk):
         count = self._project.set_image_paths(dir_path, paths)
         self._apply_manual_statuses(dir_path)
         self._filter_status_snapshot.clear()
+        self._image_undo_managers.clear()
+        self._navigation_undo_stack.clear()
 
         pending_refresh = self._pending_refresh
         self._pending_refresh = None
@@ -1356,6 +1377,43 @@ class AnnotationApp(tk.Tk):
             **extra,
         }
 
+    def _undo_suffix_text(self) -> str:
+        item = self._project.current_image
+        if not item:
+            return ''
+        edit_steps = self._current_image_undo_manager().undo_description
+        nav_item = self._peek_navigation_undo() if self._project.image_filter != ImageFilter.ALL else None
+        parts = []
+        if edit_steps:
+            parts.append(f'撤销:{edit_steps}')
+        if nav_item:
+            parts.append(f'回退:{nav_item.name}')
+        return ' | '.join(parts)
+
+    def _compose_status_text(self, item: ImageItem, mode: str = '') -> str:
+        current_img, total_imgs, total_all = self._status_image_counts()
+        filter_suffix = ''
+        if self._project.image_filter != ImageFilter.ALL and total_all > 0:
+            filter_suffix = f' (总{total_all})'
+
+        parts = []
+        if total_imgs > 0:
+            parts.append(f'图片: {current_img}/{total_imgs}{filter_suffix}')
+        category = self._image_category_label(item)
+        if category:
+            parts.append(f'分类: {category}')
+        if item.width > 0 and item.height > 0:
+            parts.append(f'尺寸: {item.width}x{item.height}')
+        parts.append(f'标注: {item.annotation_count()}')
+        parts.append(f'缩放: {self._canvas._scale*100:.0f}%')
+        if mode:
+            parts.append(f'模式: {mode}')
+
+        suffix = self._undo_suffix_text()
+        if suffix:
+            parts.append(suffix)
+        return ' | '.join(parts) if parts else '就绪'
+
     def _refresh_filter_after_leaving_image(self, prev_index: int):
         """Drop a just-finished image from unannotated once navigation moves away."""
         if self._project.image_filter != ImageFilter.UNANNOTATED:
@@ -1410,7 +1468,7 @@ class AnnotationApp(tk.Tk):
         if self._project.image_filter == image_filter:
             return
 
-        self._save_before_navigate()
+        self._save_before_navigate(persist_session=True)
         self._project.image_filter = image_filter
         self._project.invalidate_filter_cache()
         self._image_filter_var.set(image_filter.value)
@@ -1433,24 +1491,59 @@ class AnnotationApp(tk.Tk):
             f'图片筛选: {labels[image_filter]} ({visible}/{total})'
         )
     
+    def _push_navigation_undo(self, item: ImageItem):
+        if item and (not self._navigation_undo_stack or self._navigation_undo_stack[-1] is not item):
+            self._navigation_undo_stack.append(item)
+
+    def _pop_navigation_undo(self):
+        while self._navigation_undo_stack:
+            item = self._navigation_undo_stack.pop()
+            if item in self._project.image_list:
+                return item
+        return None
+
+    def _peek_navigation_undo(self):
+        while self._navigation_undo_stack:
+            item = self._navigation_undo_stack[-1]
+            if item in self._project.image_list:
+                return item
+            self._navigation_undo_stack.pop()
+        return None
+
     def _prev_image(self):
-        self._save_before_navigate()
+        current = self._project.current_image
+        if current:
+            self._save_before_navigate()
         if self._project.prev_image():
+            if current:
+                self._push_navigation_undo(current)
             self._show_current_image_async()
     
     def _next_image(self):
-        self._save_before_navigate()
+        current = self._project.current_image
+        if current:
+            self._save_before_navigate()
         if self._project.next_image():
+            if current:
+                self._push_navigation_undo(current)
             self._show_current_image_async()
     
     def _goto_first(self):
-        self._save_before_navigate()
+        current = self._project.current_image
+        if current:
+            self._save_before_navigate()
         if self._project.goto_first():
+            if current:
+                self._push_navigation_undo(current)
             self._show_current_image_async()
     
     def _goto_last(self):
-        self._save_before_navigate()
+        current = self._project.current_image
+        if current:
+            self._save_before_navigate()
         if self._project.goto_last():
+            if current:
+                self._push_navigation_undo(current)
             self._show_current_image_async()
 
     def _jump_to_image(self):
@@ -1566,8 +1659,6 @@ class AnnotationApp(tk.Tk):
             self._refresh_filter_after_leaving_image(prev_index)
         self._last_displayed_index = cur_index
         
-        self._undo_manager.clear()
-        
         if not (item.is_loaded and item._pil_image):
             self._canvas.clear_all()
             return
@@ -1603,8 +1694,8 @@ class AnnotationApp(tk.Tk):
             CanvasMode.DRAWING: '绘制'
         }.get(self._canvas.mode, '')
         
-        self._status_bar.update_status(
-            **self._status_kwargs(item, mode=mode_name)
+        self._status_bar.set_info(
+            self._compose_status_text(item, mode=mode_name)
         )
         
         # Update title
@@ -1620,7 +1711,7 @@ class AnnotationApp(tk.Tk):
             if len(selected) == 1:
                 self._label_panel.highlight_class(selected[0].class_id)
             self._box_list_panel.refresh()
-            self._status_bar.update_status(**self._status_kwargs(item))
+            self._status_bar.set_info(self._compose_status_text(item))
             if self._project.image_filter != ImageFilter.ALL:
                 now = get_image_category(item)
                 item_key = id(item)
@@ -1668,7 +1759,7 @@ class AnnotationApp(tk.Tk):
             description=f'添加标注框 [{new_bbox.class_name}]',
             execute=execute, undo=undo
         )
-        self._undo_manager.record(cmd)
+        self._current_image_undo_manager().record(cmd)
         self._canvas.refresh()
         self._on_annotation_changed()
     
@@ -1696,7 +1787,7 @@ class AnnotationApp(tk.Tk):
             self._on_annotation_changed()
         
         cmd = Command(description=description, execute=execute, undo=undo)
-        self._undo_manager.record(cmd)
+        self._current_image_undo_manager().record(cmd)
         self._on_annotation_changed()
     
     def _on_mode_changed(self, mode: CanvasMode):
@@ -1769,7 +1860,7 @@ class AnnotationApp(tk.Tk):
             description=f'修改类别为 [{class_id}] {class_name}',
             execute=execute, undo=undo,
         )
-        self._undo_manager.record(cmd)
+        self._current_image_undo_manager().record(cmd)
         self._canvas.refresh()
         self._box_list_panel.refresh()
         self._on_annotation_changed()
@@ -1842,23 +1933,40 @@ class AnnotationApp(tk.Tk):
             description=f'删除 {len(selected)} 个标注框',
             execute=execute, undo=undo
         )
-        self._undo_manager.execute(cmd)
+        self._current_image_undo_manager().execute(cmd)
     
     # --- Undo/Redo ---
     
     def _undo(self):
-        desc = self._undo_manager.undo()
+        manager = self._current_image_undo_manager()
+        desc = manager.undo() if manager.can_undo() else None
         if desc:
             self._canvas.refresh()
             self._on_annotation_changed()
-            self._status_bar.set_info(f'撤销: {desc}')
+            if self._project.current_image:
+                self._status_bar.set_info(self._compose_status_text(self._project.current_image, mode=''))
+            return
+
+        if self._project.image_filter != ImageFilter.ALL:
+            item = self._peek_navigation_undo()
+            if item and item in self._project.image_list:
+                self._pop_navigation_undo()
+                if self._project.goto_image(self._project.image_list.index(item)):
+                    self._show_current_image_async()
+                    return
+
+        self._status_bar.set_info('没有可撤销内容')
     
     def _redo(self):
-        desc = self._undo_manager.redo()
+        manager = self._current_image_undo_manager()
+        desc = manager.redo() if manager.can_redo() else None
         if desc:
             self._canvas.refresh()
             self._on_annotation_changed()
-            self._status_bar.set_info(f'重做: {desc}')
+            if self._project.current_image:
+                self._status_bar.set_info(self._compose_status_text(self._project.current_image, mode=''))
+            return
+        self._status_bar.set_info('当前图没有可重做内容')
     
     # --- Save ---
     
@@ -2030,7 +2138,7 @@ class AnnotationApp(tk.Tk):
                     description=f'预标注 {count} 个框',
                     execute=execute, undo=undo,
                 )
-                self._undo_manager.execute(cmd)
+                self._current_image_undo_manager().execute(cmd)
             
             self._status_bar.success(
                 f'预标注完成: {count} 个目标, 耗时 {time_text}'
@@ -2223,8 +2331,8 @@ class AnnotationApp(tk.Tk):
 Ctrl+O      打开目录
 Ctrl+S      保存
 Ctrl+Shift+S 导出
-Ctrl+Z      撤销
-Ctrl+Y      重做
+Ctrl+Z      撤销（先当前图编辑，再恢复上一张图）
+Ctrl+Y      重做（仅当前图）
 Ctrl+A      全选
 Ctrl+I      反选
 Delete      删除选中锚框
