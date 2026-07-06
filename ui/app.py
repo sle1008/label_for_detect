@@ -36,7 +36,7 @@ from ui.status_bar import StatusBar
 from ui.dialogs import ExportDialog, StatisticsDialog, LabelLoadDialog, JumpToImageDialog
 from io_ops.annotation_status import (
     get_image_category, is_image_annotated, invalidate_annotation_status,
-    load_manual_statuses, save_manual_statuses,
+    load_manual_statuses, save_manual_statuses, preferred_annotation_txt_path,
     IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED, IMAGE_CATEGORY_UNCERTAIN,
 )
 from io_ops.image_files import delete_image_and_labels, delete_annotation_files
@@ -2014,8 +2014,9 @@ class AnnotationApp(tk.Tk):
                 print(f"Failed to read image size for {item.path}: {e}")
                 return False
         
-        txt_path = item.path.with_suffix('.txt')
+        txt_path = preferred_annotation_txt_path(item.path)
         try:
+            txt_path.parent.mkdir(parents=True, exist_ok=True)
             with open(txt_path, 'w', encoding='utf-8') as f:
                 for ann in item.annotations:
                     f.write(ann.to_yolo(w, h) + '\n')

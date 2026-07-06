@@ -5,6 +5,7 @@ from typing import List
 
 from core.annotation import BBox
 from core.label_manager import LabelDef
+from io_ops.annotation_status import resolve_annotation_txt_path
 
 
 def parse_txt_labels(path: str) -> List[LabelDef]:
@@ -61,29 +62,10 @@ def parse_yaml_labels(path: str) -> List[LabelDef]:
 
 def load_annotation_file(image_path: Path, label_manager,
                          img_width: int = None, img_height: int = None) -> List[BBox]:
-    """Load YOLO format annotation file for an image.
-    
-    Looks for .txt file with same name as image in same directory
-    or in a 'labels' sibling directory.
-    """
+    """Load YOLO format annotation file for an image."""
     annotations = []
-    
-    # Try same directory
-    txt_path = image_path.with_suffix('.txt')
-    
-    # Try labels directory (YOLO dataset structure)
-    if not txt_path.exists():
-        labels_dir = image_path.parent.parent / 'labels' / image_path.parent.name
-        if labels_dir.exists():
-            txt_path = labels_dir / (image_path.stem + '.txt')
-    
-    # Try labels directory (flat)
-    if not txt_path.exists():
-        labels_dir = image_path.parent.parent / 'labels'
-        if labels_dir.exists():
-            txt_path = labels_dir / (image_path.stem + '.txt')
-    
-    if not txt_path.exists():
+    txt_path = resolve_annotation_txt_path(image_path)
+    if txt_path is None:
         return annotations
     
     if img_width is None or img_height is None:

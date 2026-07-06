@@ -18,25 +18,65 @@ VALID_IMAGE_CATEGORIES = frozenset({
 })
 
 
+def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
+    """Return possible YOLO label paths for an image, ordered by preference."""
+    stem_txt = image_path.stem + '.txt'
+    paths = [image_path.with_suffix('.txt')]
+
+    parent = image_path.parent
+    grandparent = parent.parent
+    great_grandparent = grandparent.parent
+
+    # YOLO flat split: test/images/img.jpg -> test/labels/img.txt
+    paths.append(grandparent / 'labels' / stem_txt)
+
+    # YOLO class-subfolder split:
+    # test/images/class/img.jpg -> test/labels/img.txt
+    paths.append(great_grandparent / 'labels' / stem_txt)
+
+    # YOLO mirrored class folders:
+    # test/images/class/img.jpg -> test/labels/class/img.txt
+    paths.append(grandparent / 'labels' / parent.name / stem_txt)
+    paths.append(great_grandparent / 'labels' / parent.name / stem_txt)
+
+    unique_paths = []
+    seen = set()
+    for path in paths:
+        key = path.resolve() if path.exists() else path.absolute()
+        if key not in seen:
+            seen.add(key)
+            unique_paths.append(path)
+    return unique_paths
+
+
 def resolve_annotation_txt_path(image_path: Path) -> Optional[Path]:
     """Return the YOLO label file path for an image, if it exists."""
-    txt_path = image_path.with_suffix('.txt')
+    for txt_path in candidate_annotation_txt_paths(image_path):
+        if txt_path.exists():
+            return txt_path
+    return None
 
-    if not txt_path.exists():
-        labels_dir = image_path.parent.parent / 'labels' / image_path.parent.name
-        if labels_dir.exists():
-            candidate = labels_dir / (image_path.stem + '.txt')
-            if candidate.exists():
-                return candidate
 
-    if not txt_path.exists():
-        labels_dir = image_path.parent.parent / 'labels'
-        if labels_dir.exists():
-            candidate = labels_dir / (image_path.stem + '.txt')
-            if candidate.exists():
-                return candidate
+def preferred_annotation_txt_path(image_path: Path) -> Path:
+    """Return where a new YOLO label file should be written for an image."""
+    existing = resolve_annotation_txt_path(image_path)
+    if existing is not None:
+        return existing
 
-    return txt_path if txt_path.exists() else None
+    parent = image_path.parent
+    grandparent = parent.parent
+    great_grandparent = grandparent.parent
+    stem_txt = image_path.stem + '.txt'
+
+    # If the image lives below an images directory, save to the sibling labels
+    # split directory. For class-subfolder images, prefer a flat labels folder
+    # to match datasets such as test/images/class/*.jpg + test/labels/*.txt.
+    if grandparent.name.lower() in {'images', 'image', 'imgs'}:
+        return great_grandparent / 'labels' / stem_txt
+    if parent.name.lower() in {'images', 'image', 'imgs'}:
+        return grandparent / 'labels' / stem_txt
+
+    return image_path.with_suffix('.txt')
 
 
 def label_file_exists(item: ImageItem) -> bool:

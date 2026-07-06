@@ -51,6 +51,24 @@ class AnnotationFileTests(unittest.TestCase):
             self.assertEqual(anns[0].class_id, 0)
             self.assertAlmostEqual(anns[0].center()[0], 137, delta=2)
 
+    def test_load_yolo_annotation_for_class_subfolder_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img_dir = root / 'test' / 'images' / 'african buffalo'
+            label_dir = root / 'test' / 'labels'
+            img_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            img = img_dir / 'african buffalo_00007_943f6b4af4.jpg'
+            img.write_bytes(b'fake')
+            label = label_dir / 'african buffalo_00007_943f6b4af4.txt'
+            label.write_text('0 0.5 0.5 0.4 0.4\n', encoding='utf-8')
+
+            mgr = LabelManager()
+            mgr.add_label('bear')
+            anns = load_annotation_file(img, mgr, img_width=100, img_height=100)
+            self.assertEqual(len(anns), 1)
+            self.assertEqual(anns[0].class_id, 0)
+
 
 class ProjectScanTests(unittest.TestCase):
     def test_scan_directory(self):
