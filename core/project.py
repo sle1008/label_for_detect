@@ -8,7 +8,8 @@ from typing import List, Optional
 
 from core.image_item import ImageItem
 from io_ops.annotation_status import (
-    get_image_category, is_image_annotated,
+    get_image_category, is_image_annotated, annotation_file_contains_class,
+    resolve_annotation_txt_path,
     IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED,
 )
 from utils.constants import IMAGE_EXTENSIONS
@@ -30,6 +31,8 @@ class Project:
     image_dir: Optional[Path] = None
     is_modified: bool = False
     image_filter: ImageFilter = ImageFilter.ALL
+    label_filter_class_id: Optional[int] = None
+    _label_contains_cache: dict = field(default_factory=dict, repr=False)
     _filtered_indices_cache: Optional[List[int]] = field(default=None, repr=False)
     
     @property
@@ -85,6 +88,38 @@ class Project:
     def invalidate_filter_cache(self):
         self._filtered_indices_cache = None
 
+    def invalidate_label_cache(self):
+        self._label_contains_cache.clear()
+        self._filtered_indices_cache = None
+
+    def cache_label_contains(self, path: Path, class_ids: set):
+        self._label_contains_cache[str(path.resolve())] = set(class_ids)
+
+    def label_contains_class(self, item: ImageItem, class_id: int) -> bool:
+        key = str(item.path.resolve())
+        cached = self._label_contains_cache.get(key)
+        if cached is not None:
+            return class_id in cached
+        if item.annotations:
+            class_ids = {ann.class_id for ann in item.annotations}
+            self._label_contains_cache[key] = class_ids
+            return class_id in class_ids
+        txt_path = resolve_annotation_txt_path(item.path)
+        if txt_path is None:
+            self._label_contains_cache[key] = set()
+            return False
+        class_ids = set()
+        try:
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts:
+                        class_ids.add(int(float(parts[0])))
+        except Exception:
+            pass
+        self._label_contains_cache[key] = class_ids
+        return class_id in class_ids
+
     def lingers_in_unannotated_while_editing(self, index: int, item: ImageItem) -> bool:
         """Keep the current image in the unannotated filter while it is being edited."""
         if self.image_filter != ImageFilter.UNANNOTATED:
@@ -96,28 +131,29 @@ class Project:
         return item.annotation_count() > 0
 
     def matches_image_filter(self, index: int, item: ImageItem) -> bool:
-        category = get_image_category(item)
-        if category == self.image_filter.value:
+        status_matches = self.image_filter == ImageFilter.ALL
+        if not status_matches:
+            category = get_image_category(item)
+            status_matches = category == self.image_filter.value
+            if not status_matches:
+                status_matches = self.lingers_in_unannotated_while_editing(index, item)
+        if not status_matches:
+            return False
+        if self.label_filter_class_id is None:
             return True
-        return self.lingers_in_unannotated_while_editing(index, item)
+        return self.label_contains_class(item, self.label_filter_class_id)
 
     def get_filtered_indices(self) -> List[int]:
-        """Indices into image_list that match the active filter, in original order."""
-        if self.image_filter == ImageFilter.ALL:
-            return list(range(len(self.image_list)))
-
-        # Unannotated filter keeps the current image while editing; skip cache.
-        if (
-            self._filtered_indices_cache is not None
-            and self.image_filter != ImageFilter.UNANNOTATED
-        ):
+        """Indices into image_list that match the active filters, in original order."""
+        cacheable = self.image_filter != ImageFilter.UNANNOTATED
+        if cacheable and self._filtered_indices_cache is not None:
             return self._filtered_indices_cache
 
         indices: List[int] = []
         for i, item in enumerate(self.image_list):
             if self.matches_image_filter(i, item):
                 indices.append(i)
-        if self.image_filter != ImageFilter.UNANNOTATED:
+        if cacheable:
             self._filtered_indices_cache = indices
         return indices
 

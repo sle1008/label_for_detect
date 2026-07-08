@@ -13,7 +13,7 @@ from core.image_item import ImageItem
 from core.project import Project, ImageFilter
 from core.label_manager import LabelManager
 from io_ops.label_file_parser import load_annotation_file
-from io_ops.annotation_status import infer_label_category_from_annotations
+from io_ops.annotation_status import infer_label_category_from_annotations, annotation_file_contains_class
 from utils.geometry import yolo_to_pixel, pixel_to_yolo
 
 
@@ -83,6 +83,18 @@ class AnnotationFileTests(unittest.TestCase):
             infer_label_category_from_annotations(['deer', 'pig']),
             'deer',
         )
+
+    def test_annotation_file_contains_class_reads_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img = root / 'image.jpg'
+            txt = root / 'image.txt'
+            img.write_bytes(b'fake')
+            txt.write_text('1 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+            item = ImageItem(path=img)
+
+            self.assertTrue(annotation_file_contains_class(item, 1))
+            self.assertFalse(annotation_file_contains_class(item, 0))
 
 
 class ProjectScanTests(unittest.TestCase):

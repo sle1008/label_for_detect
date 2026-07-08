@@ -102,6 +102,25 @@ def infer_label_category_from_annotations(annotation_names: Sequence[str]) -> Op
     return max(counts.keys(), key=lambda name: (counts[name], -first_seen[name]))
 
 
+def annotation_file_contains_class(item: ImageItem, class_id: int) -> bool:
+    """Return true when the image's YOLO label file contains class_id."""
+    if item._annotations_loaded or item.is_dirty:
+        return any(ann.class_id == class_id for ann in item.annotations)
+
+    txt_path = resolve_annotation_txt_path(item.path)
+    if txt_path is None:
+        return False
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts and int(float(parts[0])) == class_id:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def label_file_exists(item: ImageItem) -> bool:
     """True when a label (.txt) file exists for the image, even if empty."""
     return resolve_annotation_txt_path(item.path) is not None

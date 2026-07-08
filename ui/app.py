@@ -89,9 +89,15 @@ class AnnotationApp(tk.Tk):
         self._main_thread_queue = queue.Queue()
         self._filter_status_snapshot = {}
         self._pending_refresh = None
+        self._label_cache_ready_generation = -1
+        self._label_cache_job_generation = 0
+        self._label_cache_jobs = set()
+        self._label_cache_progress = 0
         self._pane_layout_after_id = None
         self._pane_layout_retry_count = 0
         self._last_displayed_index = -1
+        self._label_filter_var = tk.StringVar(value='')
+        self._label_filter_display_to_id = {}
         
         # Apply saved geometry
         if self._config.window_geometry:
@@ -165,6 +171,7 @@ class AnnotationApp(tk.Tk):
             }
         )
         self._toolbar.pack(fill='x', side='top', padx=6, pady=(4, 2))
+        self._setup_filter_bar()
         
         # Status bar
         self._status_bar = StatusBar(self)
@@ -259,6 +266,33 @@ class AnnotationApp(tk.Tk):
         self._paned.bind('<ButtonRelease-1>', self._on_main_paned_sash_release)
         self._right_paned.bind('<ButtonRelease-1>', self._on_right_paned_sash_release)
         self.after_idle(self._apply_saved_pane_layout)
+
+    def _setup_filter_bar(self):
+        self._filter_bar = tk.Frame(self, bg=UI_BG_COLOR, bd=0)
+        self._filter_bar.pack(fill='x', side='top', padx=8, pady=(0, 2))
+        tk.Label(
+            self._filter_bar, text='状态分类:', bg=UI_BG_COLOR, fg=UI_TEXT_COLOR,
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left', padx=(0, 4))
+        self._status_filter_combo = ttk.Combobox(
+            self._filter_bar, width=10, state='readonly',
+            values=['全部图片', '已标注', '未标注', '不确定'],
+        )
+        self._status_filter_combo.current(0)
+        self._status_filter_combo.pack(side='left', padx=(0, 12))
+        self._status_filter_combo.bind('<<ComboboxSelected>>', self._on_status_filter_combo_selected)
+
+        tk.Label(
+            self._filter_bar, text='标签分类:', bg=UI_BG_COLOR, fg=UI_TEXT_COLOR,
+            font=('Microsoft YaHei UI', 9),
+        ).pack(side='left', padx=(0, 4))
+        self._label_filter_combo = ttk.Combobox(
+            self._filter_bar, width=22, state='readonly', textvariable=self._label_filter_var,
+            values=['全部标签'],
+        )
+        self._label_filter_combo.current(0)
+        self._label_filter_combo.pack(side='left')
+        self._label_filter_combo.bind('<<ComboboxSelected>>', self._on_label_filter_combo_selected)
     
     def _main_pane_sash_x(self, index: int) -> int:
         """Horizontal tk.PanedWindow uses sash_coord/sash_place, not sashpos."""
@@ -478,7 +512,7 @@ class AnnotationApp(tk.Tk):
             label='不确定', variable=self._image_filter_var, value='uncertain',
             command=lambda: self._apply_image_filter(ImageFilter.UNCERTAIN),
         )
-        menubar.add_cascade(label='分类', menu=img_menu)
+        menubar.add_cascade(label='状态分类', menu=img_menu)
         
         # Help - inline entries at the end of menubar
         menubar.add_command(label='快捷键说明', command=self._show_shortcuts)
@@ -770,6 +804,7 @@ class AnnotationApp(tk.Tk):
         if self._config.label_definitions:
             self._label_manager.from_dict_list(self._config.label_definitions)
             self._label_panel.refresh()
+            self._refresh_label_filter_options()
         
         # Restore last directory
         if self._config.last_directory and Path(self._config.last_directory).is_dir():
@@ -794,6 +829,7 @@ class AnnotationApp(tk.Tk):
         except ValueError:
             self._project.image_filter = ImageFilter.ALL
         self._image_filter_var.set(self._project.image_filter.value)
+        self._sync_status_filter_combo()
     
     def _save_session(self):
         """Save current session settings."""
@@ -925,8 +961,56 @@ class AnnotationApp(tk.Tk):
                     self._load_item_annotations(item)
                 except Exception:
                     pass
+            self.after(0, self._start_label_cache_preload)
         
         threading.Thread(target=bg, daemon=True).start()
+    
+    def _start_label_cache_preload(self):
+        if not self._project.image_list:
+            return
+        if self._label_cache_ready_generation == self._scan_generation:
+            return
+        if self._label_cache_job_generation == self._scan_generation and self._label_cache_jobs:
+            return
+        self._label_cache_job_generation = self._scan_generation
+        self._label_cache_jobs.add(self._label_cache_job_generation)
+        self._label_cache_progress = 0
+        self._status_bar.set_overlay('标签缓存中... 0%')
+
+        import threading
+        def bg(gen=self._label_cache_job_generation):
+            total = len(self._project.image_list)
+            for idx, item in enumerate(self._project.image_list, start=1):
+                if self._label_cache_job_generation != gen:
+                    return
+                try:
+                    class_ids = set()
+                    if item.annotations:
+                        class_ids = {ann.class_id for ann in item.annotations}
+                    else:
+                        txt = preferred_annotation_txt_path(item.path)
+                        if txt.exists():
+                            with open(txt, 'r', encoding='utf-8') as f:
+                                for line in f:
+                                    parts = line.strip().split()
+                                    if parts:
+                                        class_ids.add(int(float(parts[0])))
+                    self._project.cache_label_contains(item.path, class_ids)
+                except Exception:
+                    self._project.cache_label_contains(item.path, set())
+                if total > 0:
+                    progress = int(idx * 100 / total)
+                    if progress != self._label_cache_progress:
+                        self._label_cache_progress = progress
+                        self.after(0, lambda p=progress: self._status_bar.set_overlay(f'标签缓存中... {p}%'))
+            self.after(0, lambda gen=gen: self._finish_label_cache_preload(gen))
+        threading.Thread(target=bg, daemon=True).start()
+
+    def _finish_label_cache_preload(self, gen: int):
+        self._label_cache_ready_generation = gen
+        self._label_cache_jobs.discard(gen)
+        self._label_cache_progress = 100
+        self._status_bar.set_info('标签缓存完成')
     
     def _current_image_undo_manager(self) -> UndoRedoManager:
         item = self._project.current_image
@@ -1230,6 +1314,7 @@ class AnnotationApp(tk.Tk):
             return False
 
         self._label_panel.refresh()
+        self._refresh_label_filter_options()
         self._config.last_label_file = str(classes_file)
         item = self._project.current_image
         if item:
@@ -1241,6 +1326,7 @@ class AnnotationApp(tk.Tk):
         """Load labels from folder names and write classes.txt beside images."""
         count = self._label_manager.load_from_folder_names(names, clear=True)
         self._label_panel.refresh()
+        self._refresh_label_filter_options()
         
         label_path = Path(dir_path) / 'classes.txt'
         try:
@@ -1306,6 +1392,7 @@ class AnnotationApp(tk.Tk):
             return
         
         self._label_panel.refresh()
+        self._refresh_label_filter_options()
         self._config.last_label_file = path
         self._status_bar.set_info(f'已加载 {count} 个标签')
     
@@ -1356,6 +1443,13 @@ class AnnotationApp(tk.Tk):
             self.title('目标检测标注工具')
 
     def _filter_hint_text(self) -> str:
+        status = self._status_filter_label()
+        label = self._label_filter_label()
+        if label:
+            return f'{status} - {label}' if status else label
+        return status
+
+    def _status_filter_label(self) -> str:
         if self._project.image_filter == ImageFilter.ANNOTATED:
             return '已标注'
         if self._project.image_filter == ImageFilter.UNANNOTATED:
@@ -1363,6 +1457,19 @@ class AnnotationApp(tk.Tk):
         if self._project.image_filter == ImageFilter.UNCERTAIN:
             return '不确定'
         return ''
+
+    def _label_filter_label(self) -> str:
+        class_id = self._project.label_filter_class_id
+        if class_id is None:
+            return ''
+        return self._label_manager.get_name(class_id)
+
+    def _classification_status_label(self, item: ImageItem) -> str:
+        status = self._image_category_label(item)
+        label = self._label_filter_label()
+        if label:
+            return f'{status} - {label}' if status else label
+        return status
 
     def _image_category_label(self, item: ImageItem) -> str:
         labels = {
@@ -1392,7 +1499,7 @@ class AnnotationApp(tk.Tk):
             'current_img': current_img,
             'total_imgs': total_imgs,
             'total_suffix': filter_suffix,
-            'category': self._image_category_label(item),
+            'category': self._classification_status_label(item),
             'img_width': item.width,
             'img_height': item.height,
             'ann_count': item.annotation_count(),
@@ -1422,7 +1529,7 @@ class AnnotationApp(tk.Tk):
         parts = []
         if total_imgs > 0:
             parts.append(f'图片: {current_img}/{total_imgs}{filter_suffix}')
-        category = self._image_category_label(item)
+        category = self._classification_status_label(item)
         if category:
             parts.append(f'分类: {category}')
         if item.width > 0 and item.height > 0:
@@ -1486,6 +1593,49 @@ class AnnotationApp(tk.Tk):
             else:
                 self._thumb_panel.set_current_by_full_index(cur)
 
+    def _on_status_filter_combo_selected(self, event=None):
+        mapping = {
+            '全部图片': ImageFilter.ALL,
+            '已标注': ImageFilter.ANNOTATED,
+            '未标注': ImageFilter.UNANNOTATED,
+            '不确定': ImageFilter.UNCERTAIN,
+        }
+        self._apply_image_filter(mapping.get(self._status_filter_combo.get(), ImageFilter.ALL))
+
+    def _on_label_filter_combo_selected(self, event=None):
+        display = self._label_filter_var.get()
+        class_id = self._label_filter_display_to_id.get(display)
+        self._apply_label_filter(class_id)
+
+    def _sync_status_filter_combo(self):
+        labels = {
+            ImageFilter.ALL: '全部图片',
+            ImageFilter.ANNOTATED: '已标注',
+            ImageFilter.UNANNOTATED: '未标注',
+            ImageFilter.UNCERTAIN: '不确定',
+        }
+        if hasattr(self, '_status_filter_combo'):
+            self._status_filter_combo.set(labels.get(self._project.image_filter, '全部图片'))
+
+    def _refresh_label_filter_options(self):
+        current = self._project.label_filter_class_id
+        self._label_filter_display_to_id = {'全部标签': None}
+        values = ['全部标签']
+        for label in self._label_manager.labels_for_display():
+            text = f'[{label.class_id}] {label.name}'
+            self._label_filter_display_to_id[text] = label.class_id
+            values.append(text)
+        self._label_filter_combo.config(values=values)
+        if current is not None and self._label_manager.has_class(current):
+            current_text = next(
+                text for text, class_id in self._label_filter_display_to_id.items()
+                if class_id == current
+            )
+            self._label_filter_var.set(current_text)
+        else:
+            self._project.label_filter_class_id = None
+            self._label_filter_var.set('全部标签')
+
     def _apply_image_filter(self, image_filter: ImageFilter):
         """Switch visible images by annotation status."""
         if self._project.image_filter == image_filter:
@@ -1495,23 +1645,35 @@ class AnnotationApp(tk.Tk):
         self._project.image_filter = image_filter
         self._project.invalidate_filter_cache()
         self._image_filter_var.set(image_filter.value)
+        self._sync_status_filter_combo()
         self._config.image_filter = image_filter.value
         self._config_manager.save(self._config)
 
-        labels = {
-            ImageFilter.ALL: '全部图片',
-            ImageFilter.ANNOTATED: '已标注',
-            ImageFilter.UNANNOTATED: '未标注',
-            ImageFilter.UNCERTAIN: '不确定',
-        }
         visible = len(self._project.get_filtered_indices())
         total = self._project.total_images
 
-        jump = 'first' if image_filter != ImageFilter.ALL else 'keep'
-        self._refresh_image_list_view(jump=jump)
+        self._refresh_image_list_view(jump='first')
+        if self._label_cache_ready_generation != self._scan_generation:
+            self._status_bar.set_overlay('标签缓存中...')
 
         self._status_bar.set_info(
-            f'图片筛选: {labels[image_filter]} ({visible}/{total})'
+            f'图片筛选: {self._filter_hint_text() or "全部图片"} ({visible}/{total})'
+        )
+
+    def _apply_label_filter(self, class_id: Optional[int]):
+        if self._project.label_filter_class_id == class_id:
+            return
+
+        self._save_before_navigate(persist_session=True)
+        self._project.label_filter_class_id = class_id
+        self._project.invalidate_filter_cache()
+        self._refresh_label_filter_options()
+
+        visible = len(self._project.get_filtered_indices())
+        total = self._project.total_images
+        self._refresh_image_list_view(jump='first')
+        self._status_bar.set_info(
+            f'图片筛选: {self._filter_hint_text() or "全部图片"} ({visible}/{total})'
         )
     
     def _push_navigation_undo(self, item: ImageItem):
