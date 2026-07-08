@@ -13,6 +13,7 @@ from core.image_item import ImageItem
 from core.project import Project, ImageFilter
 from core.label_manager import LabelManager
 from io_ops.label_file_parser import load_annotation_file
+from io_ops.annotation_status import infer_label_category_from_annotations
 from utils.geometry import yolo_to_pixel, pixel_to_yolo
 
 
@@ -68,6 +69,20 @@ class AnnotationFileTests(unittest.TestCase):
             anns = load_annotation_file(img, mgr, img_width=100, img_height=100)
             self.assertEqual(len(anns), 1)
             self.assertEqual(anns[0].class_id, 0)
+
+    def test_infer_dominant_label_category(self):
+        self.assertEqual(
+            infer_label_category_from_annotations(['deer']),
+            'deer',
+        )
+        self.assertEqual(
+            infer_label_category_from_annotations(['deer', 'pig', 'pig']),
+            'pig',
+        )
+        self.assertEqual(
+            infer_label_category_from_annotations(['deer', 'pig']),
+            'deer',
+        )
 
 
 class ProjectScanTests(unittest.TestCase):

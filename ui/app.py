@@ -37,6 +37,7 @@ from ui.dialogs import ExportDialog, StatisticsDialog, LabelLoadDialog, JumpToIm
 from io_ops.annotation_status import (
     get_image_category, is_image_annotated, invalidate_annotation_status,
     load_manual_statuses, save_manual_statuses, preferred_annotation_txt_path,
+    label_class_folder_for_image, infer_label_category_from_annotations,
     IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED, IMAGE_CATEGORY_UNCERTAIN,
 )
 from io_ops.image_files import delete_image_and_labels, delete_annotation_files
@@ -989,6 +990,12 @@ class AnnotationApp(tk.Tk):
             'current_index': self._project.current_index,
         }
         self._load_directory(str(dir_path), from_refresh=True)
+
+    def _queue_directory_refresh_for_current_item(self):
+        """Refresh the directory shortly after save so moved files reappear correctly."""
+        if self._project.image_dir is None or self._pending_refresh is not None:
+            return
+        self.after(50, self._refresh_directory)
     
     def _load_directory(self, dir_path: str, from_refresh: bool = False):
         """Load images from directory without blocking the UI."""
@@ -1995,9 +2002,12 @@ class AnnotationApp(tk.Tk):
     
     def _save_current(self):
         """Save current annotations."""
-        self._save_current_annotations()
+        refreshed = self._save_current_annotations()
         self._save_session()
-        self._status_bar.set_info('已保存')
+        if refreshed:
+            self._status_bar.set_info('已保存，正在刷新分类...')
+        else:
+            self._status_bar.set_info('已保存')
     
     def _save_item_annotations(self, item: ImageItem) -> bool:
         """Save YOLO format annotations for one image."""
@@ -2015,11 +2025,32 @@ class AnnotationApp(tk.Tk):
                 return False
         
         txt_path = preferred_annotation_txt_path(item.path)
+        class_name = infer_label_category_from_annotations([ann.class_name for ann in item.annotations])
+        class_dir = label_class_folder_for_image(item.path)
+        new_image_path = item.path
+        if class_name and class_dir is not None:
+            txt_path = class_dir / f'{item.stem}.txt'
+            if item.path.parent.parent.name.lower() == 'images':
+                new_image_path = item.path.parent.parent.parent / 'images' / class_name / item.name
+            elif item.path.parent.name.lower() == 'images':
+                new_image_path = item.path.parent.parent / 'images' / class_name / item.name
+            else:
+                new_image_path = item.path.parent / class_name / item.name
         try:
+            old_txt_path = preferred_annotation_txt_path(item.path)
             txt_path.parent.mkdir(parents=True, exist_ok=True)
+            if new_image_path != item.path:
+                new_image_path.parent.mkdir(parents=True, exist_ok=True)
+                item.path.replace(new_image_path)
+                item.path = new_image_path
             with open(txt_path, 'w', encoding='utf-8') as f:
                 for ann in item.annotations:
                     f.write(ann.to_yolo(w, h) + '\n')
+            if old_txt_path != txt_path and old_txt_path.exists():
+                try:
+                    old_txt_path.unlink()
+                except Exception:
+                    pass
             item.mark_clean()
             return True
         except Exception as e:
@@ -2029,8 +2060,12 @@ class AnnotationApp(tk.Tk):
     def _save_current_annotations(self):
         """Save YOLO format annotations for current image."""
         item = self._project.current_image
-        if item:
-            self._save_item_annotations(item)
+        if not item:
+            return False
+        changed = self._save_item_annotations(item)
+        if changed:
+            self._queue_directory_refresh_for_current_item()
+        return changed
     
     # --- View ---
     

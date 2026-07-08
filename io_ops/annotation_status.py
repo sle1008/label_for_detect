@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 from core.image_item import ImageItem
 
@@ -16,6 +16,7 @@ VALID_IMAGE_CATEGORIES = frozenset({
     IMAGE_CATEGORY_UNANNOTATED,
     IMAGE_CATEGORY_UNCERTAIN,
 })
+IMAGE_FOLDER_NAMES = frozenset({'images', 'image', 'imgs'})
 
 
 def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
@@ -68,15 +69,37 @@ def preferred_annotation_txt_path(image_path: Path) -> Path:
     great_grandparent = grandparent.parent
     stem_txt = image_path.stem + '.txt'
 
-    # If the image lives below an images directory, save to the sibling labels
-    # split directory. For class-subfolder images, prefer a flat labels folder
-    # to match datasets such as test/images/class/*.jpg + test/labels/*.txt.
-    if grandparent.name.lower() in {'images', 'image', 'imgs'}:
+    if grandparent.name.lower() in IMAGE_FOLDER_NAMES:
         return great_grandparent / 'labels' / stem_txt
-    if parent.name.lower() in {'images', 'image', 'imgs'}:
+    if parent.name.lower() in IMAGE_FOLDER_NAMES:
         return grandparent / 'labels' / stem_txt
 
     return image_path.with_suffix('.txt')
+
+
+def label_class_folder_for_image(image_path: Path) -> Optional[Path]:
+    """Return the target label folder for class-based datasets, if any."""
+    parent = image_path.parent
+    grandparent = parent.parent
+    great_grandparent = grandparent.parent
+
+    if grandparent.name.lower() in IMAGE_FOLDER_NAMES:
+        return grandparent / 'labels' / parent.name
+    if parent.name.lower() in IMAGE_FOLDER_NAMES:
+        return grandparent / 'labels' / parent.name
+    return None
+
+
+def infer_label_category_from_annotations(annotation_names: Sequence[str]) -> Optional[str]:
+    """Infer the image category name from annotations using dominant class rules."""
+    if not annotation_names:
+        return None
+    counts: Dict[str, int] = {}
+    first_seen: Dict[str, int] = {}
+    for idx, name in enumerate(annotation_names):
+        counts[name] = counts.get(name, 0) + 1
+        first_seen.setdefault(name, idx)
+    return max(counts.keys(), key=lambda name: (counts[name], -first_seen[name]))
 
 
 def label_file_exists(item: ImageItem) -> bool:
