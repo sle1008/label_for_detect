@@ -107,9 +107,6 @@ class StatusBar(ttk.Frame):
         """Backward compatibility - same as info()."""
         self.info(text)
 
-    def set_overlay(self, text: str):
-        """Set the current message without writing to log history."""
-        self._current_msg.set(text)
     
     def update_status(self, current_img: int, total_imgs: int,
                       img_width: int = 0, img_height: int = 0,

@@ -53,7 +53,7 @@ from utils.paths import get_icon_path, format_image_display_path
 from utils.constants import (
     DEFAULT_CONFIDENCE_THRESHOLD, UI_BG_COLOR, UI_PANEL_BG,
     UI_SURFACE_BG, UI_TEXT_COLOR, UI_BORDER, UI_TOOLBAR_BG, UI_ACCENT,
-    LEFT_PANEL_WIDTH, RIGHT_PANEL_WIDTH,
+    LEFT_PANEL_WIDTH, RIGHT_PANEL_WIDTH, RIGHT_PANEL_MIN_WIDTH_2K, RIGHT_PANEL_MIN_WIDTH_4K,
     PRELOAD_FORWARD, PRELOAD_BACKWARD,
 )
 
@@ -96,8 +96,9 @@ class AnnotationApp(tk.Tk):
         self._pane_layout_after_id = None
         self._pane_layout_retry_count = 0
         self._last_displayed_index = -1
-        self._label_filter_var = tk.StringVar(value='')
-        self._label_filter_display_to_id = {}
+        self._label_filter_var = tk.StringVar(value='全部标签')
+        self._label_filter_display_to_id = {'全部标签': None}
+        self._label_filter_popup = None
         
         # Apply saved geometry
         if self._config.window_geometry:
@@ -171,7 +172,6 @@ class AnnotationApp(tk.Tk):
             }
         )
         self._toolbar.pack(fill='x', side='top', padx=6, pady=(4, 2))
-        self._setup_filter_bar()
         
         # Status bar
         self._status_bar = StatusBar(self)
@@ -260,40 +260,13 @@ class AnnotationApp(tk.Tk):
         self._right_paned.add(self._box_list_panel, weight=26)
         
         self._paned.add(
-            self._right_wrap, minsize=RIGHT_PANEL_WIDTH,
+            self._right_wrap, minsize=self._right_panel_min_width(),
             width=right_w, stretch='never',
         )
         self._paned.bind('<ButtonRelease-1>', self._on_main_paned_sash_release)
         self._right_paned.bind('<ButtonRelease-1>', self._on_right_paned_sash_release)
         self.after_idle(self._apply_saved_pane_layout)
 
-    def _setup_filter_bar(self):
-        self._filter_bar = tk.Frame(self, bg=UI_BG_COLOR, bd=0)
-        self._filter_bar.pack(fill='x', side='top', padx=8, pady=(0, 2))
-        tk.Label(
-            self._filter_bar, text='状态分类:', bg=UI_BG_COLOR, fg=UI_TEXT_COLOR,
-            font=('Microsoft YaHei UI', 9),
-        ).pack(side='left', padx=(0, 4))
-        self._status_filter_combo = ttk.Combobox(
-            self._filter_bar, width=10, state='readonly',
-            values=['全部图片', '已标注', '未标注', '不确定'],
-        )
-        self._status_filter_combo.current(0)
-        self._status_filter_combo.pack(side='left', padx=(0, 12))
-        self._status_filter_combo.bind('<<ComboboxSelected>>', self._on_status_filter_combo_selected)
-
-        tk.Label(
-            self._filter_bar, text='标签分类:', bg=UI_BG_COLOR, fg=UI_TEXT_COLOR,
-            font=('Microsoft YaHei UI', 9),
-        ).pack(side='left', padx=(0, 4))
-        self._label_filter_combo = ttk.Combobox(
-            self._filter_bar, width=22, state='readonly', textvariable=self._label_filter_var,
-            values=['全部标签'],
-        )
-        self._label_filter_combo.current(0)
-        self._label_filter_combo.pack(side='left')
-        self._label_filter_combo.bind('<<ComboboxSelected>>', self._on_label_filter_combo_selected)
-    
     def _main_pane_sash_x(self, index: int) -> int:
         """Horizontal tk.PanedWindow uses sash_coord/sash_place, not sashpos."""
         return int(self._paned.sash_coord(index)[0])
@@ -325,9 +298,16 @@ class AnnotationApp(tk.Tk):
 
     def _saved_right_panel_width(self) -> int:
         width = int(getattr(self._config, 'right_panel_width', 0) or 0)
-        if width < RIGHT_PANEL_WIDTH:
-            return RIGHT_PANEL_WIDTH
+        min_width = self._right_panel_min_width()
+        if width < min_width:
+            return min_width
         return width
+
+    def _right_panel_min_width(self) -> int:
+        sw = max(1, self.winfo_screenwidth())
+        if sw >= 3500:
+            return RIGHT_PANEL_MIN_WIDTH_4K
+        return RIGHT_PANEL_MIN_WIDTH_2K
 
     def _main_paned_sash_width(self) -> int:
         return int(self._paned.cget('sashwidth')) + 2 * int(self._paned.cget('sashpad') or 0)
@@ -343,7 +323,7 @@ class AnnotationApp(tk.Tk):
             total = max(1, self._paned.winfo_width())
             pos = self._main_pane_sash_x(1)
             width = total - pos - self._main_paned_sash_width()
-            return max(RIGHT_PANEL_WIDTH, width)
+            return max(self._right_panel_min_width(), width)
         except (tk.TclError, AttributeError, IndexError):
             return self._saved_right_panel_width()
 
@@ -513,6 +493,13 @@ class AnnotationApp(tk.Tk):
             command=lambda: self._apply_image_filter(ImageFilter.UNCERTAIN),
         )
         menubar.add_cascade(label='状态分类', menu=img_menu)
+
+        self._label_filter_menu = tk.Menu(menubar, tearoff=0)
+        self._label_filter_var = tk.StringVar(value='全部标签')
+        self._label_filter_menu_current = '全部标签'
+        self._label_filter_values = []
+        self._rebuild_label_filter_menu()
+        menubar.add_cascade(label='标签分类', menu=self._label_filter_menu)
         
         # Help - inline entries at the end of menubar
         menubar.add_command(label='快捷键说明', command=self._show_shortcuts)
@@ -1512,13 +1499,13 @@ class AnnotationApp(tk.Tk):
         if not item:
             return ''
         edit_steps = self._current_image_undo_manager().undo_description
-        nav_item = self._peek_navigation_undo() if self._project.image_filter != ImageFilter.ALL else None
-        parts = []
         if edit_steps:
-            parts.append(f'撤销:{edit_steps}')
-        if nav_item:
-            parts.append(f'回退:{nav_item.name}')
-        return ' | '.join(parts)
+            return f'撤销编辑: {edit_steps}'
+        if get_image_category(item) == IMAGE_CATEGORY_UNCERTAIN:
+            nav_item = self._peek_navigation_undo()
+            if nav_item:
+                return f'撤销编辑 | 回退上一张: {nav_item.name}'
+        return '撤销编辑'
 
     def _compose_status_text(self, item: ImageItem, mode: str = '') -> str:
         current_img, total_imgs, total_all = self._status_image_counts()
@@ -1617,24 +1604,58 @@ class AnnotationApp(tk.Tk):
         if hasattr(self, '_status_filter_combo'):
             self._status_filter_combo.set(labels.get(self._project.image_filter, '全部图片'))
 
-    def _refresh_label_filter_options(self):
-        current = self._project.label_filter_class_id
+    def _rebuild_label_filter_menu(self):
+        self._label_filter_menu.delete(0, 'end')
         self._label_filter_display_to_id = {'全部标签': None}
-        values = ['全部标签']
-        for label in self._label_manager.labels_for_display():
-            text = f'[{label.class_id}] {label.name}'
-            self._label_filter_display_to_id[text] = label.class_id
-            values.append(text)
-        self._label_filter_combo.config(values=values)
+        labels = self._label_manager.labels_for_display()
+        current = self._project.label_filter_class_id
+
+        self._label_filter_menu.add_radiobutton(
+            label='全部标签', variable=self._label_filter_var, value='全部标签',
+            command=lambda: self._apply_label_filter(None),
+        )
+        if labels:
+            self._label_filter_menu.add_separator()
+            if len(labels) <= 40:
+                for label in labels:
+                    text = f'[{label.class_id}] {label.name}'
+                    self._label_filter_display_to_id[text] = label.class_id
+                    self._label_filter_menu.add_radiobutton(
+                        label=text, variable=self._label_filter_var, value=text,
+                        command=lambda cid=label.class_id: self._apply_label_filter(cid),
+                    )
+            else:
+                for start in range(0, len(labels), 40):
+                    chunk = labels[start:start + 40]
+                    sub_menu = tk.Menu(self._label_filter_menu, tearoff=0)
+                    for label in chunk:
+                        text = f'[{label.class_id}] {label.name}'
+                        self._label_filter_display_to_id[text] = label.class_id
+                        sub_menu.add_radiobutton(
+                            label=text, variable=self._label_filter_var, value=text,
+                            command=lambda cid=label.class_id: self._apply_label_filter(cid),
+                        )
+                    end = start + len(chunk)
+                    self._label_filter_menu.add_cascade(label=f'{start + 1}-{end}', menu=sub_menu)
+        self._label_filter_menu.configure(postcommand=self._sync_label_filter_menu)
+
         if current is not None and self._label_manager.has_class(current):
             current_text = next(
                 text for text, class_id in self._label_filter_display_to_id.items()
                 if class_id == current
             )
             self._label_filter_var.set(current_text)
+            self._label_filter_menu_current = current_text
         else:
             self._project.label_filter_class_id = None
             self._label_filter_var.set('全部标签')
+            self._label_filter_menu_current = '全部标签'
+
+    def _sync_label_filter_menu(self):
+        self._label_filter_var.set(self._label_filter_menu_current)
+
+    def _refresh_label_filter_options(self):
+        self._rebuild_label_filter_menu()
 
     def _apply_image_filter(self, image_filter: ImageFilter):
         """Switch visible images by annotation status."""
@@ -1653,8 +1674,6 @@ class AnnotationApp(tk.Tk):
         total = self._project.total_images
 
         self._refresh_image_list_view(jump='first')
-        if self._label_cache_ready_generation != self._scan_generation:
-            self._status_bar.set_overlay('标签缓存中...')
 
         self._status_bar.set_info(
             f'图片筛选: {self._filter_hint_text() or "全部图片"} ({visible}/{total})'
@@ -1668,6 +1687,11 @@ class AnnotationApp(tk.Tk):
         self._project.label_filter_class_id = class_id
         self._project.invalidate_filter_cache()
         self._refresh_label_filter_options()
+        self._label_filter_menu_current = '全部标签' if class_id is None else next(
+            (text for text, cid in self._label_filter_display_to_id.items() if cid == class_id),
+            '全部标签',
+        )
+        self._status_bar.set_info('标签筛选更新中...')
 
         visible = len(self._project.get_filtered_indices())
         total = self._project.total_images
@@ -2139,7 +2163,8 @@ class AnnotationApp(tk.Tk):
                 self._status_bar.set_info(self._compose_status_text(self._project.current_image, mode=''))
             return
 
-        if self._project.image_filter != ImageFilter.ALL:
+        current = self._project.current_image
+        if current and get_image_category(current) == IMAGE_CATEGORY_UNCERTAIN:
             item = self._peek_navigation_undo()
             if item and item in self._project.image_list:
                 self._pop_navigation_undo()
