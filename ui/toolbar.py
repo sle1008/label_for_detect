@@ -58,7 +58,7 @@ class Toolbar(tk.Frame):
         return btn
 
     def _setup_ui(self):
-        self._make_button("\U0001f4c2 打开目录", "open_dir", bg="#4a90d9", fg="white")
+        self._make_button("\U0001f504 刷新目录", "refresh_dir", bg="#4a90d9", fg="white")
         self._make_button("\U0001f4be 保存", "save", bg="#5cb85c", fg="white")
         self._make_button("\U0001f3f7 加载标签", "load_labels", bg="#7b68ae", fg="white")
 

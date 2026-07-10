@@ -153,7 +153,7 @@ class AnnotationApp(tk.Tk):
         # Toolbar
         self._toolbar = Toolbar(
             self, callbacks={
-                'open_dir': self._open_directory,
+                'refresh_dir': self._refresh_directory,
                 'save': self._save_current,
                 'load_labels': self._load_label_file,
                 'prev_image': self._prev_image,
@@ -698,7 +698,7 @@ class AnnotationApp(tk.Tk):
     
     def _setup_bindings(self):
         """Setup keyboard shortcuts."""
-        self.bind('<Control-o>', lambda e: self._open_directory())
+        self.bind('<Control-o>', lambda e: self._refresh_directory())
         self.bind('<Control-s>', lambda e: self._save_current())
         self.bind('<Control-S>', lambda e: self._export())  # Ctrl+Shift+S
         self.bind('<Control-z>', lambda e: self._undo())
