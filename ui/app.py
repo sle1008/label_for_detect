@@ -1531,20 +1531,6 @@ class AnnotationApp(tk.Tk):
             parts.append(suffix)
         return ' | '.join(parts) if parts else '就绪'
 
-    def _refresh_filter_after_leaving_image(self, prev_index: int):
-        """Drop a just-finished image from unannotated once navigation moves away."""
-        if self._project.image_filter != ImageFilter.UNANNOTATED:
-            return
-        if not (0 <= prev_index < len(self._project.image_list)):
-            return
-        prev_item = self._project.image_list[prev_index]
-        if (
-            get_image_category(prev_item) == IMAGE_CATEGORY_ANNOTATED
-            and prev_item.annotation_count() > 0
-        ):
-            self._project.invalidate_filter_cache()
-            self._refresh_image_list_view(jump='keep', navigate=False)
-
     def _refresh_image_list_view(self, jump: str = 'keep', navigate: bool = True):
         """Refresh left list for the active filter without changing sort order."""
         indices = self._project.get_filtered_indices()
@@ -1862,11 +1848,7 @@ class AnnotationApp(tk.Tk):
         if not item:
             return
 
-        prev_index = self._last_displayed_index
-        cur_index = self._project.current_index
-        if prev_index >= 0 and prev_index != cur_index:
-            self._refresh_filter_after_leaving_image(prev_index)
-        self._last_displayed_index = cur_index
+        self._last_displayed_index = self._project.current_index
         
         if not (item.is_loaded and item._pil_image):
             self._canvas.clear_all()
@@ -1931,17 +1913,6 @@ class AnnotationApp(tk.Tk):
                 self._filter_status_snapshot[item_key] = now
                 if prev is not None and prev != now:
                     self._project.invalidate_filter_cache()
-                    dropped_from_filter = (
-                        self._project.image_filter != ImageFilter.ALL
-                        and now != self._project.image_filter.value
-                        and not self._project.lingers_in_unannotated_while_editing(
-                            self._project.current_index, item,
-                        )
-                    )
-                    self._refresh_image_list_view(
-                        jump='keep',
-                        navigate=dropped_from_filter,
-                    )
     
     def _on_new_bbox(self, bbox: BBox):
         """Handle new bbox drawn on canvas - with undo support."""
