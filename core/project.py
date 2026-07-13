@@ -34,6 +34,7 @@ class Project:
     label_filter_class_id: Optional[int] = None
     _label_contains_cache: dict = field(default_factory=dict, repr=False)
     _filtered_indices_cache: Optional[List[int]] = field(default=None, repr=False)
+    _visible_indices_snapshot: Optional[List[int]] = field(default=None, repr=False)
     
     @property
     def current_image(self) -> Optional[ImageItem]:
@@ -82,6 +83,7 @@ class Project:
         self.image_dir = Path(dir_path)
         self.image_list = [ImageItem(path=p) for p in paths]
         self.current_index = 0 if self.image_list else -1
+        self._visible_indices_snapshot = None
         self.invalidate_filter_cache()
         return len(self.image_list)
 
@@ -157,8 +159,18 @@ class Project:
             self._filtered_indices_cache = indices
         return indices
 
+    def set_visible_indices(self, indices: List[int]):
+        """Freeze navigation to the image indices currently shown in the UI."""
+        self._visible_indices_snapshot = list(indices)
+
+    def get_visible_indices(self) -> List[int]:
+        """Return the current UI list snapshot, or the active filter result."""
+        if self._visible_indices_snapshot is not None:
+            return list(self._visible_indices_snapshot)
+        return list(self.get_filtered_indices())
+
     def _visible_indices(self) -> List[int]:
-        return self.get_filtered_indices()
+        return self.get_visible_indices()
     
     def next_image(self) -> bool:
         """Move to next image in the current filter. Returns True if moved."""
@@ -240,6 +252,7 @@ class Project:
             return self.current_index
 
         del self.image_list[index]
+        self._visible_indices_snapshot = None
         self.invalidate_filter_cache()
 
         if not self.image_list:
@@ -289,4 +302,5 @@ class Project:
         self.current_index = -1
         self.image_dir = None
         self.is_modified = False
+        self._visible_indices_snapshot = None
         self.invalidate_filter_cache()

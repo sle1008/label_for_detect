@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -13,6 +14,7 @@ from core.image_item import ImageItem
 from core.project import Project, ImageFilter
 from core.label_manager import LabelManager
 from io_ops.label_file_parser import load_annotation_file
+from io_ops.annotation_writer import write_yolo_annotations_atomic
 from io_ops.annotation_status import infer_label_category_from_annotations, annotation_file_contains_class
 from utils.geometry import yolo_to_pixel, pixel_to_yolo
 
@@ -95,6 +97,34 @@ class AnnotationFileTests(unittest.TestCase):
 
             self.assertTrue(annotation_file_contains_class(item, 1))
             self.assertFalse(annotation_file_contains_class(item, 0))
+
+    def test_atomic_yolo_save_replaces_complete_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'sample.txt'
+            path.write_text('old incomplete content', encoding='utf-8')
+            annotations = [
+                BBox(x1=10, y1=20, x2=50, y2=80, class_id=3, class_name='deer'),
+            ]
+
+            write_yolo_annotations_atomic(path, annotations, 100, 100)
+
+            self.assertEqual(path.read_text(encoding='utf-8'), annotations[0].to_yolo(100, 100) + '\n')
+            self.assertEqual(list(Path(tmp).glob('*.tmp')), [])
+
+    def test_atomic_yolo_save_preserves_old_file_when_replace_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'sample.txt'
+            path.write_text('previous complete file\n', encoding='utf-8')
+            annotations = [
+                BBox(x1=10, y1=20, x2=50, y2=80, class_id=3, class_name='deer'),
+            ]
+
+            with patch('io_ops.annotation_writer.os.replace', side_effect=OSError('disk error')):
+                with self.assertRaises(OSError):
+                    write_yolo_annotations_atomic(path, annotations, 100, 100)
+
+            self.assertEqual(path.read_text(encoding='utf-8'), 'previous complete file\n')
+            self.assertEqual(list(Path(tmp).glob('*.tmp')), [])
 
 
 class ProjectScanTests(unittest.TestCase):
@@ -194,6 +224,27 @@ class ProjectFilterTests(unittest.TestCase):
             self.assertEqual(project.current_index, 2)
             self.assertTrue(project.prev_image())
             self.assertEqual(project.current_index, 0)
+
+    def test_navigation_keeps_visible_list_snapshot_after_annotation_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('a.jpg', 'b.jpg', 'c.jpg'):
+                (root / name).write_bytes(b'x')
+
+            project = Project()
+            project.set_image_paths(str(root), Project.scan_image_paths(str(root)))
+            project.image_filter = ImageFilter.UNANNOTATED
+            project.set_visible_indices(project.get_filtered_indices())
+            project.goto_image(1)
+            project.image_list[1].add_annotation(
+                BBox(class_id=0, class_name='deer', x1=10, y1=10, x2=50, y2=50),
+            )
+            project.invalidate_filter_cache()
+
+            self.assertTrue(project.next_image())
+            self.assertEqual(project.current_index, 2)
+            self.assertTrue(project.prev_image())
+            self.assertEqual(project.current_index, 1)
 
     def test_next_filtered_index_after(self):
         with tempfile.TemporaryDirectory() as tmp:

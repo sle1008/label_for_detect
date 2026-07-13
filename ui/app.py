@@ -41,6 +41,7 @@ from io_ops.annotation_status import (
     IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED, IMAGE_CATEGORY_UNCERTAIN,
 )
 from io_ops.image_files import delete_image_and_labels, delete_annotation_files
+from io_ops.annotation_writer import write_yolo_annotations_atomic
 from io_ops.folder_labels import (
     detect_class_folder_layout,
     infer_immediate_subfolder_name,
@@ -96,6 +97,7 @@ class AnnotationApp(tk.Tk):
         self._pane_layout_after_id = None
         self._pane_layout_retry_count = 0
         self._last_displayed_index = -1
+        self._last_save_error = ''
         self._label_filter_var = tk.StringVar(value='全部标签')
         self._label_filter_display_to_id = {'全部标签': None}
         self._label_filter_popup = None
@@ -605,7 +607,8 @@ class AnnotationApp(tk.Tk):
             return
 
         if full_index != self._project.current_index:
-            self._save_before_navigate()
+            if not self._save_before_navigate():
+                return
 
         ok, err = delete_image_and_labels(item)
         if not ok:
@@ -665,7 +668,9 @@ class AnnotationApp(tk.Tk):
             item.manual_annotation_status = None
             item._annotations_loaded = True
             item.mark_dirty()
-            self._save_item_annotations(item)
+            if not self._save_item_annotations(item):
+                self._report_save_failure(item)
+                return
         elif category == IMAGE_CATEGORY_UNCERTAIN:
             item.manual_annotation_status = IMAGE_CATEGORY_UNCERTAIN
         else:
@@ -1017,11 +1022,14 @@ class AnnotationApp(tk.Tk):
         immediately, while config/manual-status persistence is deferred to
         explicit save, filter changes, directory changes, and app close.
         """
-        self._save_current_annotations()
+        if not self._save_current_annotations():
+            self._report_save_failure(self._project.current_image)
+            return False
         self._persist_current_position()
         if persist_session:
             self._save_manual_statuses()
             self._save_session()
+        return True
 
     def _mark_real_annotation_change(self, item: ImageItem):
         """Mark an item as having real content changes.
@@ -1062,12 +1070,6 @@ class AnnotationApp(tk.Tk):
         }
         self._load_directory(str(dir_path), from_refresh=True)
 
-    def _queue_directory_refresh_for_current_item(self):
-        """Refresh the directory shortly after save so moved files reappear correctly."""
-        if self._project.image_dir is None or self._pending_refresh is not None:
-            return
-        self.after(50, self._refresh_directory)
-    
     def _load_directory(self, dir_path: str, from_refresh: bool = False):
         """Load images from directory without blocking the UI."""
         import threading
@@ -1077,7 +1079,10 @@ class AnnotationApp(tk.Tk):
         )
         self.update_idletasks()
         
-        self._save_current_annotations()
+        failed_item = self._save_all_dirty_annotations()
+        if failed_item is not None:
+            self._report_save_failure(failed_item)
+            return
         if from_refresh:
             self._save_manual_statuses()
         self._image_loader.clear_cache()
@@ -1468,7 +1473,7 @@ class AnnotationApp(tk.Tk):
 
     def _status_image_counts(self) -> tuple:
         """Return (position in visible list, visible total, all total)."""
-        indices = self._project.get_filtered_indices()
+        indices = self._project.get_visible_indices()
         total_all = self._project.total_images
         if not indices:
             return 0, 0, total_all
@@ -1537,13 +1542,15 @@ class AnnotationApp(tk.Tk):
         items = [self._project.image_list[i] for i in indices]
         hint = self._filter_hint_text()
         self._thumb_panel.set_images(items, full_indices=indices, filter_hint=hint)
+        self._project.set_visible_indices(indices)
 
         cur = self._project.current_index
         if jump == 'first' and indices:
             target = indices[0]
             if target != cur:
                 if navigate:
-                    self._save_before_navigate()
+                    if not self._save_before_navigate():
+                        return
                 self._project.goto_image(target)
                 if navigate:
                     self._show_current_image_async()
@@ -1557,7 +1564,8 @@ class AnnotationApp(tk.Tk):
             elif navigate and indices:
                 next_idx = self._project.next_filtered_index_after(cur)
                 if next_idx is not None:
-                    self._save_before_navigate()
+                    if not self._save_before_navigate():
+                        return
                     self._project.goto_image(next_idx)
                     self._thumb_panel.set_current_by_full_index(next_idx)
                     self._show_current_image_async()
@@ -1648,7 +1656,10 @@ class AnnotationApp(tk.Tk):
         if self._project.image_filter == image_filter:
             return
 
-        self._save_before_navigate(persist_session=True)
+        if not self._save_before_navigate(persist_session=True):
+            self._image_filter_var.set(self._project.image_filter.value)
+            self._sync_status_filter_combo()
+            return
         self._project.image_filter = image_filter
         self._project.invalidate_filter_cache()
         self._image_filter_var.set(image_filter.value)
@@ -1669,7 +1680,9 @@ class AnnotationApp(tk.Tk):
         if self._project.label_filter_class_id == class_id:
             return
 
-        self._save_before_navigate(persist_session=True)
+        if not self._save_before_navigate(persist_session=True):
+            self._sync_label_filter_menu()
+            return
         self._project.label_filter_class_id = class_id
         self._project.invalidate_filter_cache()
         self._refresh_label_filter_options()
@@ -1708,7 +1721,8 @@ class AnnotationApp(tk.Tk):
     def _prev_image(self):
         current = self._project.current_image
         if current:
-            self._save_before_navigate()
+            if not self._save_before_navigate():
+                return
         if self._project.prev_image():
             if current:
                 self._push_navigation_undo(current)
@@ -1717,7 +1731,8 @@ class AnnotationApp(tk.Tk):
     def _next_image(self):
         current = self._project.current_image
         if current:
-            self._save_before_navigate()
+            if not self._save_before_navigate():
+                return
         if self._project.next_image():
             if current:
                 self._push_navigation_undo(current)
@@ -1726,7 +1741,8 @@ class AnnotationApp(tk.Tk):
     def _goto_first(self):
         current = self._project.current_image
         if current:
-            self._save_before_navigate()
+            if not self._save_before_navigate():
+                return
         if self._project.goto_first():
             if current:
                 self._push_navigation_undo(current)
@@ -1735,7 +1751,8 @@ class AnnotationApp(tk.Tk):
     def _goto_last(self):
         current = self._project.current_image
         if current:
-            self._save_before_navigate()
+            if not self._save_before_navigate():
+                return
         if self._project.goto_last():
             if current:
                 self._push_navigation_undo(current)
@@ -1743,7 +1760,7 @@ class AnnotationApp(tk.Tk):
 
     def _jump_to_image(self):
         """Jump to a 1-based index in the currently visible image list."""
-        indices = self._project.get_filtered_indices()
+        indices = self._project.get_visible_indices()
         if not indices:
             showwarning(self, '提示', '当前没有可跳转的图片')
             return
@@ -1758,7 +1775,8 @@ class AnnotationApp(tk.Tk):
             showwarning(self, '提示', f'请输入 1 到 {total} 之间的序号')
             return
 
-        self._save_before_navigate()
+        if not self._save_before_navigate():
+            return
         if self._project.goto_image(indices[target_pos - 1]):
             self._show_current_image_async()
     
@@ -1813,7 +1831,9 @@ class AnnotationApp(tk.Tk):
         )
     
     def _on_thumb_selected(self, index: int):
-        self._save_before_navigate()
+        if not self._save_before_navigate():
+            self._thumb_panel.set_current_by_full_index(self._project.current_index)
+            return
         if self._project.goto_image(index):
             self._show_current_image_async()
     
@@ -2160,17 +2180,19 @@ class AnnotationApp(tk.Tk):
     
     def _save_current(self):
         """Save current annotations."""
-        refreshed = self._save_current_annotations()
+        saved = self._save_current_annotations()
+        if not saved:
+            self._report_save_failure(self._project.current_image)
+            return
         self._save_session()
-        if refreshed:
-            self._status_bar.set_info('已保存，正在刷新分类...')
-        else:
-            self._status_bar.set_info('已保存')
+        self._status_bar.set_info('已保存')
     
     def _save_item_annotations(self, item: ImageItem) -> bool:
         """Save YOLO format annotations for one image."""
         if not item or not item.is_dirty:
-            return False
+            return True
+
+        self._last_save_error = ''
         
         w, h = item.width, item.height
         if w <= 0 or h <= 0:
@@ -2179,6 +2201,7 @@ class AnnotationApp(tk.Tk):
                 with Image.open(item.path) as img:
                     w, h = img.size
             except Exception as e:
+                self._last_save_error = f'无法读取图片尺寸: {e}'
                 print(f"Failed to read image size for {item.path}: {e}")
                 return False
         
@@ -2201,29 +2224,43 @@ class AnnotationApp(tk.Tk):
                 new_image_path.parent.mkdir(parents=True, exist_ok=True)
                 item.path.replace(new_image_path)
                 item.path = new_image_path
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                for ann in item.annotations:
-                    f.write(ann.to_yolo(w, h) + '\n')
+            write_yolo_annotations_atomic(txt_path, item.annotations, w, h)
             if old_txt_path != txt_path and old_txt_path.exists():
                 try:
                     old_txt_path.unlink()
                 except Exception:
                     pass
             item.mark_clean()
+            self._project.cache_label_contains(
+                item.path, {annotation.class_id for annotation in item.annotations},
+            )
             return True
         except Exception as e:
+            self._last_save_error = str(e)
             print(f"Failed to save annotations for {item.path}: {e}")
             return False
     
     def _save_current_annotations(self):
-        """Save YOLO format annotations for current image."""
+        """Save current YOLO annotations and report whether the write succeeded."""
         item = self._project.current_image
         if not item:
-            return False
-        changed = self._save_item_annotations(item)
-        if changed:
-            self._queue_directory_refresh_for_current_item()
-        return changed
+            return True
+        return self._save_item_annotations(item)
+
+    def _save_all_dirty_annotations(self) -> Optional[ImageItem]:
+        """Save every modified item, returning the first item that could not be saved."""
+        for item in self._project.image_list:
+            if item.is_dirty and not self._save_item_annotations(item):
+                return item
+        return None
+
+    def _report_save_failure(self, item: Optional[ImageItem]):
+        """Keep the current image active when its annotation file cannot be saved."""
+        name = self._format_image_path(item) if item else '当前图片'
+        detail = self._last_save_error or '未知写盘错误'
+        message = f'标注保存失败，已取消切换或关闭操作。\n\n{name}\n\n{detail}'
+        self._status_bar.error(f'保存失败: {name}')
+        showerror(self, '保存失败', message)
     
     # --- View ---
     
@@ -2407,7 +2444,7 @@ class AnnotationApp(tk.Tk):
             ImageFilter.UNANNOTATED: '未标注',
             ImageFilter.UNCERTAIN: '不确定',
         }
-        indices = self._project.get_filtered_indices()
+        indices = self._project.get_visible_indices()
         targets = [self._project.image_list[i] for i in indices]
         total = len(targets)
         label = filter_labels[self._project.image_filter]
@@ -2586,7 +2623,10 @@ Escape      取消绘制 / 取消选中
         """Handle window close."""
         self._cancel_pane_layout_apply()
         try:
-            self._save_current_annotations()
+            failed_item = self._save_all_dirty_annotations()
+            if failed_item is not None:
+                self._report_save_failure(failed_item)
+                return
             self._save_manual_statuses()
             self._persist_current_position()
             self._save_session()
