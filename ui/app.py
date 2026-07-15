@@ -62,6 +62,9 @@ from utils.constants import (
 )
 
 
+LABEL_FILTER_ITEMS_PER_COLUMN = 40
+
+
 class AnnotationApp(tk.Tk):
     """Main annotation application window."""
     
@@ -1635,27 +1638,19 @@ class AnnotationApp(tk.Tk):
         )
         if labels:
             self._label_filter_menu.add_separator()
-            if len(labels) <= 40:
-                for label in labels:
-                    text = f'[{label.class_id}] {label.name}'
-                    self._label_filter_display_to_id[text] = label.class_id
-                    self._label_filter_menu.add_radiobutton(
-                        label=text, variable=self._label_filter_var, value=text,
-                        command=lambda cid=label.class_id: self._apply_label_filter(cid),
-                    )
-            else:
-                for start in range(0, len(labels), 40):
-                    chunk = labels[start:start + 40]
-                    sub_menu = tk.Menu(self._label_filter_menu, tearoff=0)
-                    for label in chunk:
-                        text = f'[{label.class_id}] {label.name}'
-                        self._label_filter_display_to_id[text] = label.class_id
-                        sub_menu.add_radiobutton(
-                            label=text, variable=self._label_filter_var, value=text,
-                            command=lambda cid=label.class_id: self._apply_label_filter(cid),
-                        )
-                    end = start + len(chunk)
-                    self._label_filter_menu.add_cascade(label=f'{start + 1}-{end}', menu=sub_menu)
+            for index, label in enumerate(labels):
+                text = f'[{label.class_id}] {label.name}'
+                self._label_filter_display_to_id[text] = label.class_id
+                self._label_filter_menu.add_radiobutton(
+                    label=text,
+                    variable=self._label_filter_var,
+                    value=text,
+                    command=lambda cid=label.class_id: self._apply_label_filter(cid),
+                    columnbreak=(
+                        index > 0
+                        and index % LABEL_FILTER_ITEMS_PER_COLUMN == 0
+                    ),
+                )
         self._label_filter_menu.configure(postcommand=self._sync_label_filter_menu)
 
         if current is not None and self._label_manager.has_class(current):
