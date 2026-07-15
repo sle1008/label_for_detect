@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -506,6 +507,43 @@ class ImageItemMutationTests(unittest.TestCase):
 
         removed = item.remove_selected()
         self.assertEqual(len(removed), 1)
+        self.assertTrue(item.is_dirty)
+
+    def test_mark_dirty_makes_in_memory_annotations_authoritative(self):
+        item = ImageItem(path=Path('sample.jpg'))
+        self.assertFalse(item._annotations_loaded)
+
+        item.mark_dirty()
+
+        self.assertTrue(item._annotations_loaded)
+
+    def test_disk_load_does_not_overwrite_edit_started_during_read(self):
+        from ui.app import AnnotationApp
+
+        item = ImageItem(
+            path=Path('sample.jpg'),
+            width=100,
+            height=100,
+            is_loaded=True,
+        )
+        disk_box = BBox(
+            x1=1, y1=1, x2=10, y2=10,
+            class_id=0, class_name='old',
+        )
+        predicted_box = BBox(
+            x1=20, y1=20, x2=40, y2=40,
+            class_id=1, class_name='predicted',
+        )
+        app = SimpleNamespace(_label_manager=LabelManager())
+
+        def finish_disk_read(*args, **kwargs):
+            item.add_annotation(predicted_box)
+            return [disk_box]
+
+        with patch('ui.app.load_annotation_file', side_effect=finish_disk_read):
+            AnnotationApp._load_item_annotations(app, item)
+
+        self.assertEqual(item.annotations, [predicted_box])
         self.assertTrue(item.is_dirty)
 
 

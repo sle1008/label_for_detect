@@ -929,15 +929,24 @@ class AnnotationApp(tk.Tk):
     
     def _load_item_annotations(self, item: ImageItem):
         """Load YOLO annotations for an image into memory."""
-        if item._annotations_loaded or not item.is_loaded or item.width <= 0:
+        if (
+            item._annotations_loaded
+            or item.is_dirty
+            or not item.is_loaded
+            or item.width <= 0
+        ):
             return
         try:
             file_anns = load_annotation_file(
                 item.path, self._label_manager,
                 img_width=item.width, img_height=item.height,
             )
-            if file_anns:
-                item.annotations = file_anns
+            # Disk IO can overlap a main-thread edit. Once the in-memory item
+            # becomes dirty, the just-read disk snapshot is stale and must not
+            # replace newly drawn or predicted annotations.
+            if item._annotations_loaded or item.is_dirty:
+                return
+            item.annotations = file_anns
             if item.manual_annotation_status != IMAGE_CATEGORY_UNCERTAIN:
                 item.manual_annotation_status = None
             item._annotations_loaded = True
@@ -945,9 +954,7 @@ class AnnotationApp(tk.Tk):
             item._annotations_loaded = True
     
     def _preload_window_async(self, center_index: int = None):
-        """Preload images and annotations for nearby frames into memory."""
-        import threading
-        
+        """Preload nearby image pixels without mutating annotation state."""
         if not self._project.image_list:
             return
         if center_index is None:
@@ -957,21 +964,7 @@ class AnnotationApp(tk.Tk):
             center_index, self._project.image_list,
             forward=PRELOAD_FORWARD, backward=PRELOAD_BACKWARD,
         )
-        
-        start = max(0, center_index - PRELOAD_BACKWARD)
-        end = min(len(self._project.image_list), center_index + PRELOAD_FORWARD + 1)
-        items = list(self._project.image_list[start:end])
-        
-        def bg():
-            for item in items:
-                try:
-                    self._image_loader.load_image_sync(item)
-                    self._load_item_annotations(item)
-                except Exception:
-                    pass
-            self.after(0, self._start_label_cache_preload)
-        
-        threading.Thread(target=bg, daemon=True).start()
+        self._start_label_cache_preload()
     
     def _start_label_cache_preload(self):
         if not self._project.image_list:
@@ -2644,14 +2637,17 @@ Escape      取消绘制 / 取消选中
         self._cancel_pane_layout_apply()
         try:
             failed_item = self._save_all_dirty_annotations()
-            if failed_item is not None:
-                self._report_save_failure(failed_item)
-                return
-            self._save_manual_statuses()
-            self._persist_current_position()
-            self._save_session()
-        except Exception:
-            pass
+        except Exception as e:
+            self._last_save_error = str(e)
+            self._report_save_failure(self._project.current_image)
+            return
+        if failed_item is not None:
+            self._report_save_failure(failed_item)
+            return
+
+        self._save_manual_statuses()
+        self._persist_current_position()
+        self._save_session()
 
         for item in self._project.image_list:
             item._pil_image = None

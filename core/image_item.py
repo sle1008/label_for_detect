@@ -23,6 +23,9 @@ class ImageItem:
     _photo_image: Optional[ImageTk.PhotoImage] = None
     
     def mark_dirty(self):
+        # Any in-memory edit makes this annotation list authoritative. This
+        # prevents a concurrent/background disk load from replacing new boxes.
+        self._annotations_loaded = True
         self.is_dirty = True
         self._annotated_status_cached = None
     
