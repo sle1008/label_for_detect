@@ -11,7 +11,7 @@ class RestoreDirectoryDialog:
 
     WIDTH = 520
     HEIGHT = 235
-    COUNTDOWN_SECONDS = 5
+    COUNTDOWN_SECONDS = 10
 
     def __init__(self, parent, directory: str):
         self.result = None
@@ -175,31 +175,36 @@ class LabelLoadDialog:
     """Choose folder-based or file-based label import."""
 
     WIDTH = 460
-    HEIGHT = 360
+    PREVIEW_HEIGHT = 360
+    COMPACT_HEIGHT = 150
 
     def __init__(self, parent, detection=None, has_open_directory: bool = False):
         self.result = None
         self._dialog = tk.Toplevel(parent)
         self._dialog.title('加载标签')
 
-        self._setup_ui(detection, has_open_directory)
-        setup_modal_dialog(self._dialog, parent, self.WIDTH, self.HEIGHT)
+        can_folder = self._can_import_from_folders(detection, has_open_directory)
+        self._setup_ui(detection, has_open_directory, can_folder)
+        height = self.PREVIEW_HEIGHT if can_folder else self.COMPACT_HEIGHT
+        setup_modal_dialog(self._dialog, parent, self.WIDTH, height)
         self._dialog.wait_window()
 
-    def _setup_ui(self, detection, has_open_directory: bool):
+    @staticmethod
+    def _can_import_from_folders(detection, has_open_directory: bool) -> bool:
+        return bool(
+            has_open_directory
+            and detection is not None
+            and detection.detected
+            and detection.class_names
+        )
+
+    def _setup_ui(self, detection, has_open_directory: bool, can_folder: bool):
         pad = {'padx': 12, 'pady': 4}
         ttk.Label(
             self._dialog,
             text='选择标签导入方式：',
             font=('Microsoft YaHei UI', 10, 'bold'),
         ).pack(anchor='w', **pad)
-
-        can_folder = (
-            has_open_directory
-            and detection is not None
-            and detection.detected
-            and detection.class_names
-        )
 
         if can_folder:
             conf_text = {'high': '高', 'medium': '中'}.get(detection.confidence, '低')
