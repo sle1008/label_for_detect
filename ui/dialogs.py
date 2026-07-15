@@ -6,6 +6,105 @@ from tkinter import ttk, filedialog
 from ui.window_utils import setup_modal_dialog, showwarning
 
 
+class RestoreDirectoryDialog:
+    """Ask whether to restore the last directory, with a timed default."""
+
+    WIDTH = 520
+    HEIGHT = 235
+    COUNTDOWN_SECONDS = 5
+
+    def __init__(self, parent, directory: str):
+        self.result = None
+        self._remaining = self.COUNTDOWN_SECONDS
+        self._after_id = None
+        self._dialog = tk.Toplevel(parent)
+        self._dialog.title('继续上次工作')
+        self._dialog.protocol('WM_DELETE_WINDOW', self._restore)
+
+        self._setup_ui(directory)
+        setup_modal_dialog(self._dialog, parent, self.WIDTH, self.HEIGHT)
+        self._restore_button.focus_set()
+        self._dialog.bind('<Return>', lambda event: self._restore())
+        self._update_countdown()
+        self._dialog.wait_window()
+
+    def _setup_ui(self, directory: str):
+        body = ttk.Frame(self._dialog, padding=(18, 16, 18, 8))
+        body.pack(fill='both', expand=True)
+
+        ttk.Label(
+            body,
+            text='是否恢复上次打开的图片目录？',
+            font=('Microsoft YaHei UI', 11, 'bold'),
+        ).pack(anchor='w')
+        ttk.Label(
+            body,
+            text='恢复后将继续显示上次浏览的图片和筛选状态。',
+        ).pack(anchor='w', pady=(5, 10))
+
+        path_frame = ttk.LabelFrame(body, text='上次目录', padding=(10, 7))
+        path_frame.pack(fill='x')
+        ttk.Label(
+            path_frame,
+            text=directory,
+            wraplength=self.WIDTH - 70,
+            justify='left',
+        ).pack(anchor='w')
+
+        self._countdown_var = tk.StringVar()
+        ttk.Label(body, textvariable=self._countdown_var).pack(anchor='w', pady=(10, 0))
+
+        button_frame = ttk.Frame(self._dialog, padding=(18, 8, 18, 14))
+        button_frame.pack(side='bottom', fill='x')
+        self._restore_button = ttk.Button(
+            button_frame,
+            text='恢复上次目录',
+            command=self._restore,
+            width=16,
+        )
+        self._restore_button.pack(side='right', padx=(8, 0))
+        ttk.Button(
+            button_frame,
+            text='打开其他目录...',
+            command=self._browse,
+            width=16,
+        ).pack(side='right')
+
+    def _update_countdown(self):
+        if self.result is not None or not self._dialog.winfo_exists():
+            return
+        if self._remaining <= 0:
+            self._restore()
+            return
+        self._countdown_var.set(
+            f'若不选择，将在 {self._remaining} 秒后自动恢复上次目录。'
+        )
+        self._after_id = self._dialog.after(1000, self._tick)
+
+    def _tick(self):
+        self._after_id = None
+        self._remaining -= 1
+        self._update_countdown()
+
+    def _finish(self, result: str):
+        if self.result is not None:
+            return
+        self.result = result
+        if self._after_id is not None:
+            try:
+                self._dialog.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        self._dialog.destroy()
+
+    def _restore(self):
+        self._finish('restore')
+
+    def _browse(self):
+        self._finish('browse')
+
+
 class ExportDialog:
     """Export settings dialog."""
     

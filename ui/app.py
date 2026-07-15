@@ -33,7 +33,10 @@ from ui.label_panel import LabelPanel
 from ui.box_list_panel import BoxListPanel
 from ui.thumbnail_panel import ThumbnailPanel
 from ui.status_bar import StatusBar
-from ui.dialogs import ExportDialog, StatisticsDialog, LabelLoadDialog, JumpToImageDialog
+from ui.dialogs import (
+    ExportDialog, StatisticsDialog, LabelLoadDialog, JumpToImageDialog,
+    RestoreDirectoryDialog,
+)
 from io_ops.annotation_status import (
     get_image_category, is_image_annotated, invalidate_annotation_status,
     load_manual_statuses, save_manual_statuses, preferred_annotation_txt_path,
@@ -798,9 +801,19 @@ class AnnotationApp(tk.Tk):
             self._label_panel.refresh()
             self._refresh_label_filter_options()
         
-        # Restore last directory
-        if self._config.last_directory and Path(self._config.last_directory).is_dir():
-            self._load_directory(self._config.last_directory)
+        # Ask before restoring the last directory. A command-line directory or
+        # another early opener takes precedence and suppresses this prompt.
+        last_directory = self._config.last_directory
+        if (
+            not self._project.image_dir
+            and last_directory
+            and Path(last_directory).is_dir()
+        ):
+            dialog = RestoreDirectoryDialog(self, last_directory)
+            if dialog.result == 'browse':
+                self._open_directory()
+            else:
+                self._load_directory(last_directory)
         
         # Restore weights
         if self._config.last_weights_file and Path(self._config.last_weights_file).is_file():
