@@ -11,7 +11,6 @@ from utils.constants import UI_TEXT_MUTED
 
 DEFAULT_BOX_LIST_COLUMNS = {'id': 30, 'class': 80, 'conf': 50, 'coords': 120}
 _ROW_HEIGHT = 30
-_HEADING_HEIGHT = 24
 
 
 class BoxListPanel(ttk.LabelFrame):
@@ -37,9 +36,14 @@ class BoxListPanel(ttk.LabelFrame):
     def _setup_ui(self):
         style = ttk.Style(self)
         style.configure('BoxList.Treeview', rowheight=_ROW_HEIGHT)
-        
+
+        # Keep the table and count label in separate grid rows. The count row
+        # is therefore always reserved, even when both scrollbars are visible.
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
         self._table_frame = ttk.Frame(self)
-        self._table_frame.pack(fill='both', expand=True, side='top')
+        self._table_frame.grid(row=0, column=0, sticky='nsew')
         self._table_frame.rowconfigure(0, weight=1)
         self._table_frame.columnconfigure(0, weight=1)
         
@@ -69,16 +73,19 @@ class BoxListPanel(ttk.LabelFrame):
             self._table_frame, orient='horizontal', command=self._tree.xview,
         )
         self._tree.configure(
-            yscrollcommand=self._on_yscroll,
-            xscrollcommand=self._on_xscroll,
+            yscrollcommand=self._v_scroll.set,
+            xscrollcommand=self._h_scroll.set,
         )
-        
+
         self._tree.grid(row=0, column=0, sticky='nsew')
+        self._v_scroll.grid(row=0, column=1, sticky='ns')
+        self._h_scroll.grid(row=1, column=0, sticky='ew')
+
+        # Fill the scrollbar intersection so no table content can show through.
+        ttk.Frame(self._table_frame).grid(row=1, column=1, sticky='nsew')
         
         self._tree.bind('<<TreeviewSelect>>', self._on_select)
         self._tree.bind('<ButtonRelease-1>', self._on_column_resize)
-        self._tree.bind('<Configure>', lambda e: self.after_idle(self._update_scrollbars))
-        self._table_frame.bind('<Configure>', lambda e: self.after_idle(self._update_scrollbars))
         
         self._context_menu = tk.Menu(self, tearoff=0)
         self._context_menu.add_command(label='删除选中', command=self._delete_selected)
@@ -86,54 +93,13 @@ class BoxListPanel(ttk.LabelFrame):
         self._tree.bind('<Button-3>', self._on_right_click)
         
         self._stats_var = tk.StringVar(value='标注数: 0')
-        ttk.Label(self, textvariable=self._stats_var,
-                 font=('Microsoft YaHei UI', 9),
-                 foreground=UI_TEXT_MUTED).pack(fill='x', pady=(4, 0))
-    
-    def _on_yscroll(self, first, last):
-        self._v_scroll.set(first, last)
-        self.after_idle(self._update_scrollbars)
-    
-    def _on_xscroll(self, first, last):
-        self._h_scroll.set(first, last)
-        self.after_idle(self._update_scrollbars)
-    
-    def _content_width(self) -> int:
-        return sum(int(self._tree.column(c, 'width')) for c in self._columns)
-    
-    def _visible_row_capacity(self) -> int:
-        h = self._tree.winfo_height()
-        if h <= 1:
-            h = self._table_frame.winfo_height()
-        usable = max(1, h - _HEADING_HEIGHT)
-        return max(1, usable // _ROW_HEIGHT)
-    
-    def _update_scrollbars(self):
-        if not self._tree.winfo_exists():
-            return
-        
-        row_count = len(self._tree.get_children())
-        capacity = self._visible_row_capacity()
-        display_rows = min(row_count, capacity) if row_count else 1
-        if int(self._tree.cget('height')) != display_rows:
-            self._tree.configure(height=display_rows)
-        
-        tree_w = self._tree.winfo_width()
-        content_w = self._content_width()
-        need_h = tree_w > 1 and content_w > tree_w
-        need_v = row_count > capacity
-        
-        if need_v:
-            self._v_scroll.grid(row=0, column=1, sticky='ns')
-        else:
-            self._v_scroll.grid_remove()
-            self._tree.yview_moveto(0)
-        
-        if need_h:
-            self._h_scroll.grid(row=1, column=0, sticky='ew')
-        else:
-            self._h_scroll.grid_remove()
-            self._tree.xview_moveto(0)
+        self._stats_label = ttk.Label(
+            self,
+            textvariable=self._stats_var,
+            font=('Microsoft YaHei UI', 9),
+            foreground=UI_TEXT_MUTED,
+        )
+        self._stats_label.grid(row=1, column=0, sticky='ew', pady=(4, 0))
     
     def _on_column_resize(self, event):
         region = self._tree.identify_region(event.x, event.y)
@@ -142,13 +108,11 @@ class BoxListPanel(ttk.LabelFrame):
         
         widths = self.get_column_widths()
         if widths == self._column_widths:
-            self.after_idle(self._update_scrollbars)
             return
         
         self._column_widths = widths
         if self._on_column_widths_changed:
             self._on_column_widths_changed(widths)
-        self.after_idle(self._update_scrollbars)
     
     def get_column_widths(self) -> dict:
         return {
@@ -167,7 +131,6 @@ class BoxListPanel(ttk.LabelFrame):
         
         if not self._current_image:
             self._stats_var.set('标注数: 0')
-            self.after_idle(self._update_scrollbars)
             return
         
         for i, bbox in enumerate(self._current_image.annotations):
@@ -179,7 +142,6 @@ class BoxListPanel(ttk.LabelFrame):
                             values=(i+1, class_name, conf, coords))
         
         self._stats_var.set(f'标注数: {self._current_image.annotation_count()}')
-        self.after_idle(self._update_scrollbars)
     
     def _on_select(self, event):
         if not self._current_image:
