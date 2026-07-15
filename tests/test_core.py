@@ -452,6 +452,48 @@ class ClassesFileImportTests(unittest.TestCase):
             self.assertEqual(mgr.get_name(0), 'bird')
             self.assertEqual(mgr.get_name(1), 'african buffalo')
 
+    def test_load_from_yolo_yaml_uses_names_mapping_only(self):
+        content = """\
+path: /home/yushuling/datasets/animal_detection_subdivision
+train: train/images
+val: val/images
+nc: 57
+names:
+  0: bear
+  1: cat
+  2: chicken
+  3: cow
+  4: crane
+  5: deer
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / 'dataset.yaml'
+            dataset.write_text(content, encoding='utf-8')
+            mgr = LabelManager()
+
+            count = mgr.load_from_yaml(str(dataset))
+
+            self.assertEqual(count, 6)
+            self.assertEqual(
+                [(label.class_id, label.name) for label in mgr.all_labels()],
+                [
+                    (0, 'bear'),
+                    (1, 'cat'),
+                    (2, 'chicken'),
+                    (3, 'cow'),
+                    (4, 'crane'),
+                    (5, 'deer'),
+                ],
+            )
+
+    def test_load_from_yaml_without_names_returns_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / 'dataset.yml'
+            dataset.write_text('train: train/images\nnc: 2\n', encoding='utf-8')
+            mgr = LabelManager()
+
+            self.assertEqual(mgr.load_from_yaml(str(dataset)), 0)
+
 
 class ImageItemMutationTests(unittest.TestCase):
     def test_remove_selected_marks_dirty(self):

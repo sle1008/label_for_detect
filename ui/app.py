@@ -1382,24 +1382,36 @@ class AnnotationApp(tk.Tk):
             ('所有文件', '*.*'),
         ]
         path = filedialog.askopenfilename(
-            title='选择标签文件', filetypes=filetypes, parent=self,
+            title='选择标签文件（TXT / YAML）', filetypes=filetypes, parent=self,
         )
         if not path:
             return
-        
-        ext = Path(path).suffix.lower()
-        if ext == '.txt':
-            count = self._label_manager.load_from_txt(path)
-        elif ext in ('.yaml', '.yml'):
-            count = self._label_manager.load_from_yaml(path)
-        else:
-            showerror(self, '错误', '不支持的文件格式')
+
+        try:
+            ext = Path(path).suffix.lower()
+            if ext == '.txt':
+                count = self._label_manager.load_from_txt(path)
+            elif ext in ('.yaml', '.yml'):
+                count = self._label_manager.load_from_yaml(path)
+            else:
+                showerror(self, '错误', '不支持的文件格式')
+                return
+        except Exception as e:
+            showerror(self, '标签加载失败', f'无法读取标签文件：\n{e}')
             return
-        
+
+        if count <= 0:
+            hint = '未在文件中找到可用标签。'
+            if ext in ('.yaml', '.yml'):
+                hint += '\n\nYAML 文件需要包含顶层 names 字段。'
+            showwarning(self, '未找到标签', hint)
+            return
+
         self._label_panel.refresh()
         self._refresh_label_filter_options()
         self._config.last_label_file = path
-        self._status_bar.set_info(f'已加载 {count} 个标签')
+        source = 'YAML' if ext in ('.yaml', '.yml') else 'TXT'
+        self._status_bar.set_info(f'已从 {source} 文件加载 {count} 个标签')
     
     def _load_weights(self):
         """Load YOLO model for pre-annotation."""

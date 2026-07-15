@@ -82,7 +82,9 @@ class LabelManager:
         with open(path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
         
-        if not data or 'names' not in data:
+        # Dataset paths, split definitions, and ``nc`` are intentionally
+        # ignored; label import only depends on the top-level ``names`` field.
+        if not isinstance(data, dict) or 'names' not in data:
             return 0
         
         names = data['names']
@@ -91,7 +93,11 @@ class LabelManager:
         if isinstance(names, dict):
             # Dict format: {0: 'bear', 1: 'cat'}
             for class_id, name in names.items():
-                self.add_label(str(name), class_id=int(class_id))
+                try:
+                    numeric_id = int(class_id)
+                except (TypeError, ValueError):
+                    continue
+                self.add_label(str(name), class_id=numeric_id)
                 count += 1
         elif isinstance(names, list):
             # List format: ['bear', 'cat']
