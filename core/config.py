@@ -1,6 +1,7 @@
 """Configuration persistence."""
 
 import json
+import os
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List
@@ -23,6 +24,7 @@ class AppConfig:
     confidence_threshold: float = 0.25
     window_geometry: str = '1400x900'
     recent_dirs: List[str] = field(default_factory=list)
+    directory_label_files: Dict[str, str] = field(default_factory=dict)
     label_definitions: List[dict] = field(default_factory=list)
     image_filter: str = 'all'
     label_mode: str = 'full'
@@ -39,6 +41,26 @@ class AppConfig:
             self.recent_dirs.remove(dir_path)
         self.recent_dirs.insert(0, dir_path)
         self.recent_dirs = self.recent_dirs[:10]
+
+    @staticmethod
+    def _directory_key(dir_path: str) -> str:
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(dir_path))))
+
+    def remember_directory_label_file(self, dir_path: str, label_path: str):
+        """Associate an opened directory with a manually selected label file."""
+        if not isinstance(self.directory_label_files, dict):
+            self.directory_label_files = {}
+        key = self._directory_key(dir_path)
+        self.directory_label_files[key] = os.path.abspath(os.path.normpath(str(label_path)))
+
+    def directory_label_file(self, dir_path: str) -> str:
+        if not isinstance(self.directory_label_files, dict):
+            return ''
+        return self.directory_label_files.get(self._directory_key(dir_path), '')
+
+    def forget_directory_label_file(self, dir_path: str):
+        if isinstance(self.directory_label_files, dict):
+            self.directory_label_files.pop(self._directory_key(dir_path), None)
 
 
 class ConfigManager:

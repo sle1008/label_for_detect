@@ -1265,12 +1265,15 @@ class AnnotationApp(tk.Tk):
             self._config.last_directory = str(self._project.image_dir)
     
     def _try_auto_folder_labels(self, dir_path: str):
-        """Auto-import labels on directory open.
+        """Restore a manual label source or auto-import labels on directory open.
 
         Priority:
-          1) An existing ``classes.txt`` in the opened root directory.
-          2) Otherwise, class-per-subfolder name detection.
+          1) The external label file manually selected for this directory.
+          2) An existing ``classes.txt`` in the opened root directory.
+          3) Otherwise, class-per-subfolder name detection.
         """
+        if self._try_import_remembered_label_file(dir_path):
+            return
         if self._try_import_root_classes_file(dir_path):
             return
 
@@ -1290,6 +1293,26 @@ class AnnotationApp(tk.Tk):
             )
             if askyesno(self, '导入标签', msg):
                 self._apply_folder_labels(detection.class_names, dir_path)
+
+    def _try_import_remembered_label_file(self, dir_path: str) -> bool:
+        """Restore a directory's manual label file and suppress auto-detection."""
+        label_path = self._config.directory_label_file(dir_path)
+        if not label_path:
+            return False
+
+        count, error = self._replace_labels_from_file(label_path)
+        if count <= 0:
+            message = (
+                f'该目录上次使用的标签文件当前无法加载：\n{label_path}\n\n'
+                f'{error}\n\n为避免使用错误标签，本次不会按目录名自动识别。'
+            )
+            self._status_bar.warning('已跳过目录标签自动识别，请重新加载标签文件')
+            showwarning(self, '标签文件不可用', message)
+            return True
+
+        self._config.last_label_file = label_path
+        self._status_bar.success(f'已恢复上次手动标签文件，共 {count} 个标签')
+        return True
     
     def _try_import_root_classes_file(self, dir_path: str) -> bool:
         """Import a classes.txt found directly in the opened root directory.
@@ -1323,8 +1346,11 @@ class AnnotationApp(tk.Tk):
         self._status_bar.success(f'已从 classes.txt 导入 {count} 个标签')
         return True
 
-    def _apply_folder_labels(self, names: list, dir_path: str):
+    def _apply_folder_labels(self, names: list, dir_path: str, manual_choice: bool = False):
         """Load labels from folder names and write classes.txt beside images."""
+        if manual_choice:
+            self._config.forget_directory_label_file(dir_path)
+            self._config_manager.save(self._config)
         count = self._label_manager.load_from_folder_names(names, clear=True)
         self._label_panel.refresh()
         self._refresh_label_filter_options()
@@ -1365,9 +1391,46 @@ class AnnotationApp(tk.Tk):
         
         dialog = LabelLoadDialog(self, detection, has_open_directory=has_dir)
         if dialog.result == 'folder' and detection and detection.class_names:
-            self._apply_folder_labels(detection.class_names, str(self._project.image_dir))
+            self._apply_folder_labels(
+                detection.class_names,
+                str(self._project.image_dir),
+                manual_choice=True,
+            )
         elif dialog.result == 'file':
             self._load_label_file_from_disk()
+
+    def _replace_labels_from_file(self, path: str) -> tuple:
+        """Replace current labels from TXT/YAML, restoring them on any failure."""
+        ext = Path(path).suffix.lower()
+        if ext not in ('.txt', '.yaml', '.yml'):
+            return 0, '不支持的文件格式'
+
+        backup = self._label_manager.to_dict_list()
+        self._label_manager.clear()
+        try:
+            if ext == '.txt':
+                count = self._label_manager.load_from_txt(path)
+            else:
+                count = self._label_manager.load_from_yaml(path)
+        except Exception as e:
+            count = 0
+            error = f'无法读取标签文件：{e}'
+        else:
+            error = ''
+
+        if count <= 0:
+            self._label_manager.clear()
+            self._label_manager.from_dict_list(backup)
+            if not error:
+                error = '文件中没有可用标签'
+            return 0, error
+
+        self._label_panel.refresh()
+        self._refresh_label_filter_options()
+        item = self._project.current_image
+        if item:
+            self._apply_folder_default_class(item)
+        return count, ''
     
     def _load_label_file_from_disk(self):
         """Load label definitions from a txt/yaml file."""
@@ -1378,36 +1441,37 @@ class AnnotationApp(tk.Tk):
             ('所有文件', '*.*'),
         ]
         path = filedialog.askopenfilename(
-            title='选择标签文件（TXT / YAML）', filetypes=filetypes, parent=self,
+            title='选择标签文件（TXT / YAML）',
+            filetypes=filetypes,
+            initialdir=self._last_label_file_directory(),
+            parent=self,
         )
         if not path:
             return
 
-        try:
-            ext = Path(path).suffix.lower()
-            if ext == '.txt':
-                count = self._label_manager.load_from_txt(path)
-            elif ext in ('.yaml', '.yml'):
-                count = self._label_manager.load_from_yaml(path)
-            else:
-                showerror(self, '错误', '不支持的文件格式')
-                return
-        except Exception as e:
-            showerror(self, '标签加载失败', f'无法读取标签文件：\n{e}')
-            return
-
+        ext = Path(path).suffix.lower()
+        count, error = self._replace_labels_from_file(path)
         if count <= 0:
-            hint = '未在文件中找到可用标签。'
+            hint = error or '未在文件中找到可用标签。'
             if ext in ('.yaml', '.yml'):
                 hint += '\n\nYAML 文件需要包含顶层 names 字段。'
             showwarning(self, '未找到标签', hint)
             return
 
-        self._label_panel.refresh()
-        self._refresh_label_filter_options()
         self._config.last_label_file = path
+        if self._project.image_dir:
+            self._config.remember_directory_label_file(str(self._project.image_dir), path)
+        self._config.label_definitions = self._label_manager.to_dict_list()
+        self._config_manager.save(self._config)
         source = 'YAML' if ext in ('.yaml', '.yml') else 'TXT'
         self._status_bar.set_info(f'已从 {source} 文件加载 {count} 个标签')
+
+    def _last_label_file_directory(self) -> str:
+        if self._config.last_label_file:
+            parent = Path(self._config.last_label_file).parent
+            if parent.is_dir():
+                return str(parent)
+        return os.path.expanduser('~')
     
     def _load_weights(self):
         """Load YOLO model for pre-annotation."""

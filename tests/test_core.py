@@ -14,6 +14,7 @@ from core.annotation import BBox
 from core.image_item import ImageItem
 from core.project import Project, ImageFilter
 from core.label_manager import LabelManager
+from core.config import AppConfig, ConfigManager
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.annotation_writer import write_yolo_annotations_atomic
 from io_ops.annotation_status import infer_label_category_from_annotations, annotation_file_contains_class
@@ -546,6 +547,73 @@ names:
             mgr = LabelManager()
 
             self.assertEqual(mgr.load_from_yaml(str(dataset)), 0)
+
+    def test_directory_label_file_binding_normalizes_path_and_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / 'images'
+            image_dir.mkdir()
+            label_file = root / 'dataset.yaml'
+            label_file.write_text('names: [bear, cat]\n', encoding='utf-8')
+
+            config = AppConfig()
+            config.remember_directory_label_file(str(image_dir), str(label_file))
+            manager = ConfigManager(str(root / 'config'))
+            manager.save(config)
+            loaded = manager.load()
+
+            alternate_spelling = str(image_dir / '..' / 'images')
+            self.assertEqual(
+                loaded.directory_label_file(alternate_spelling),
+                str(label_file.resolve()),
+            )
+
+    def test_forgetting_directory_label_file_allows_auto_source_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AppConfig()
+            config.remember_directory_label_file(str(root), str(root / 'labels.txt'))
+
+            config.forget_directory_label_file(str(root))
+
+            self.assertEqual(config.directory_label_file(str(root)), '')
+
+    def test_remembered_label_file_suppresses_all_auto_detection(self):
+        from ui.app import AnnotationApp
+
+        calls = []
+        app = SimpleNamespace(
+            _try_import_remembered_label_file=lambda path: calls.append('manual') or True,
+            _try_import_root_classes_file=lambda path: calls.append('classes') or True,
+        )
+
+        AnnotationApp._try_auto_folder_labels(app, 'images')
+
+        self.assertEqual(calls, ['manual'])
+
+    def test_manual_label_file_replaces_auto_detected_labels(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            label_file = Path(tmp) / 'manual.yaml'
+            label_file.write_text('names: {0: bear, 1: cat}\n', encoding='utf-8')
+            manager = LabelManager()
+            manager.add_label('wrong_folder_label', class_id=57)
+            app = SimpleNamespace(
+                _label_manager=manager,
+                _label_panel=SimpleNamespace(refresh=lambda: None),
+                _refresh_label_filter_options=lambda: None,
+                _project=SimpleNamespace(current_image=None),
+            )
+
+            count, error = AnnotationApp._replace_labels_from_file(app, str(label_file))
+
+            self.assertEqual(error, '')
+            self.assertEqual(count, 2)
+            self.assertEqual(
+                [(label.class_id, label.name) for label in manager.all_labels()],
+                [(0, 'bear'), (1, 'cat')],
+            )
 
 
 class ImageItemMutationTests(unittest.TestCase):
