@@ -16,7 +16,8 @@ def write_yolo_annotations_atomic(
 ) -> None:
     """Write a complete YOLO file and atomically replace the prior version."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.is_dir():
+        raise FileNotFoundError(f'Annotation directory does not exist: {path.parent}')
     content = ''.join(
         annotation.to_yolo(image_width, image_height) + '\n'
         for annotation in annotations

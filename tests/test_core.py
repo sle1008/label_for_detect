@@ -127,6 +127,58 @@ class AnnotationFileTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding='utf-8'), 'previous complete file\n')
             self.assertEqual(list(Path(tmp).glob('*.tmp')), [])
 
+    def test_annotation_save_updates_existing_file_without_moving_or_making_directories(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / 'test' / 'images' / 'old_class'
+            label_dir = root / 'test' / 'labels'
+            image_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            image_path = image_dir / 'sample.jpg'
+            image_path.write_bytes(b'fake')
+            label_path = label_dir / 'sample.txt'
+            label_path.write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+
+            item = ImageItem(path=image_path, width=100, height=100)
+            item.add_annotation(
+                BBox(x1=10, y1=10, x2=40, y2=40, class_id=1, class_name='new_class'),
+            )
+            project = Project()
+            app = SimpleNamespace(_last_save_error='', _project=project)
+
+            self.assertTrue(AnnotationApp._save_item_annotations(app, item))
+            self.assertEqual(item.path, image_path)
+            self.assertTrue(image_path.exists())
+            self.assertEqual(
+                label_path.read_text(encoding='utf-8'),
+                item.annotations[0].to_yolo(100, 100) + '\n',
+            )
+            self.assertFalse((root / 'test' / 'images' / 'labels').exists())
+            self.assertFalse((root / 'test' / 'images' / 'new_class').exists())
+
+    def test_annotation_save_without_existing_file_creates_sidecar_only(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / 'images'
+            image_dir.mkdir()
+            image_path = image_dir / 'sample.jpg'
+            image_path.write_bytes(b'fake')
+
+            item = ImageItem(path=image_path, width=100, height=100)
+            item.add_annotation(
+                BBox(x1=10, y1=10, x2=40, y2=40, class_id=0, class_name='cow'),
+            )
+            project = Project()
+            app = SimpleNamespace(_last_save_error='', _project=project)
+
+            self.assertTrue(AnnotationApp._save_item_annotations(app, item))
+            self.assertTrue(image_path.with_suffix('.txt').exists())
+            self.assertFalse((root / 'labels').exists())
+
 
 class ProjectScanTests(unittest.TestCase):
     def test_scan_directory(self):

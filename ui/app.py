@@ -40,7 +40,7 @@ from ui.dialogs import (
 from io_ops.annotation_status import (
     get_image_category, is_image_annotated, invalidate_annotation_status,
     load_manual_statuses, save_manual_statuses, preferred_annotation_txt_path,
-    label_class_folder_for_image, infer_label_category_from_annotations,
+    resolve_annotation_txt_path,
     IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED, IMAGE_CATEGORY_UNCERTAIN,
 )
 from io_ops.image_files import delete_image_and_labels, delete_annotation_files
@@ -2218,31 +2218,11 @@ class AnnotationApp(tk.Tk):
                 print(f"Failed to read image size for {item.path}: {e}")
                 return False
         
-        txt_path = preferred_annotation_txt_path(item.path)
-        class_name = infer_label_category_from_annotations([ann.class_name for ann in item.annotations])
-        class_dir = label_class_folder_for_image(item.path)
-        new_image_path = item.path
-        if class_name and class_dir is not None:
-            txt_path = class_dir / f'{item.stem}.txt'
-            if item.path.parent.parent.name.lower() == 'images':
-                new_image_path = item.path.parent.parent.parent / 'images' / class_name / item.name
-            elif item.path.parent.name.lower() == 'images':
-                new_image_path = item.path.parent.parent / 'images' / class_name / item.name
-            else:
-                new_image_path = item.path.parent / class_name / item.name
+        txt_path = resolve_annotation_txt_path(item.path)
+        if txt_path is None:
+            txt_path = item.path.with_suffix('.txt')
         try:
-            old_txt_path = preferred_annotation_txt_path(item.path)
-            txt_path.parent.mkdir(parents=True, exist_ok=True)
-            if new_image_path != item.path:
-                new_image_path.parent.mkdir(parents=True, exist_ok=True)
-                item.path.replace(new_image_path)
-                item.path = new_image_path
             write_yolo_annotations_atomic(txt_path, item.annotations, w, h)
-            if old_txt_path != txt_path and old_txt_path.exists():
-                try:
-                    old_txt_path.unlink()
-                except Exception:
-                    pass
             item.mark_clean()
             self._project.cache_label_contains(
                 item.path, {annotation.class_id for annotation in item.annotations},
