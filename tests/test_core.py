@@ -15,6 +15,7 @@ from core.image_item import ImageItem
 from core.project import Project, ImageFilter
 from core.label_manager import LabelManager
 from core.config import AppConfig, ConfigManager
+from core.label_notes import DEFAULT_LABEL_NOTES, LabelNoteStore
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.annotation_writer import write_yolo_annotations_atomic
 from io_ops.annotation_status import infer_label_category_from_annotations, annotation_file_contains_class
@@ -614,6 +615,54 @@ names:
                 [(label.class_id, label.name) for label in manager.all_labels()],
                 [(0, 'bear'), (1, 'cat')],
             )
+
+
+class LabelNoteTests(unittest.TestCase):
+    def test_default_animal_notes_are_initialized_and_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'label_notes.json'
+            store = LabelNoteStore(path)
+
+            self.assertEqual(len(DEFAULT_LABEL_NOTES), 58)
+            self.assertEqual(store.get('bear'), '熊')
+            self.assertEqual(store.get('African Buffalo'), '非洲水牛')
+            self.assertTrue(path.is_file())
+
+    def test_custom_note_persists_without_changing_label_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'label_notes.json'
+            store = LabelNoteStore(path)
+            manager = LabelManager()
+            manager.add_label('custom animal', class_id=3)
+
+            store.set('Custom   Animal', '自定义动物')
+            reloaded = LabelNoteStore(path)
+
+            self.assertEqual(reloaded.get('custom animal'), '自定义动物')
+            self.assertEqual(manager.get_name(3), 'custom animal')
+
+    def test_empty_note_removes_persisted_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'label_notes.json'
+            store = LabelNoteStore(path)
+            store.set('bear', '')
+
+            self.assertEqual(LabelNoteStore(path).get('bear'), '')
+
+    def test_label_search_matches_original_name_and_display_note(self):
+        from ui.label_panel import LabelPanel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LabelNoteStore(Path(tmp) / 'label_notes.json')
+            manager = LabelManager()
+            manager.add_label('bear', class_id=0)
+            label = manager.all_labels()[0]
+            panel = SimpleNamespace(_note_store=store)
+
+            self.assertTrue(LabelPanel._label_matches_query(panel, label, 'bear'))
+            self.assertTrue(LabelPanel._label_matches_query(panel, label, '熊'))
+            self.assertFalse(LabelPanel._label_matches_query(panel, label, '猫'))
+            self.assertEqual(manager.get_name(0), 'bear')
 
 
 class ImageItemMutationTests(unittest.TestCase):

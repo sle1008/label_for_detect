@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.annotation import BBox
 from core.image_item import ImageItem
 from core.label_manager import LabelManager
+from core.label_notes import LabelNoteStore
 from core.project import Project, ImageFilter
 from core.undo_redo import UndoRedoManager, Command, CompoundCommand
 from core.config import AppConfig, ConfigManager
@@ -81,6 +82,7 @@ class AnnotationApp(tk.Tk):
         # Core components
         self._project = Project()
         self._label_manager = LabelManager()
+        self._label_note_store = LabelNoteStore()
         self._undo_manager = UndoRedoManager()
         self._image_undo_managers = {}
         self._navigation_undo_stack = []
@@ -243,6 +245,8 @@ class AnnotationApp(tk.Tk):
             on_sort_mode_changed=self._on_label_sort_changed,
             default_export_path=self._default_label_export_path,
             on_labels_exported=self._on_labels_file_exported,
+            note_store=self._label_note_store,
+            can_edit_note=self._can_edit_label_note,
         )
         self._label_panel.pack(fill='both', expand=True)
         self._right_paned.add(self._label_pane, weight=70)
@@ -911,6 +915,10 @@ class AnnotationApp(tk.Tk):
         self._config_manager.save(self._config)
         mode = '首字母' if sort_by_name else '序号'
         self._status_bar.set_info(f'标签列表已切换为按{mode}排序')
+
+    def _can_edit_label_note(self) -> bool:
+        item = self._project.current_image
+        return item is None or not item.get_selected_annotations()
 
     def _default_label_export_path(self) -> str:
         if self._config.last_label_file:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from core.label_manager import LabelDef, LabelManager
+from core.label_notes import LabelNoteStore
 from io_ops.folder_labels import save_labels_txt
 from ui.window_utils import setup_modal_dialog, askyesno, showinfo, showwarning, showerror
 from utils.constants import UI_SURFACE_BG, UI_TEXT_COLOR, UI_ACCENT
@@ -18,7 +19,9 @@ class LabelPanel(ttk.LabelFrame):
                  on_class_selected: Callable[[int], None] = None,
                  on_sort_mode_changed: Callable[[bool], None] = None,
                  default_export_path: Callable[[], str] = None,
-                 on_labels_exported: Callable[[str], None] = None):
+                 on_labels_exported: Callable[[str], None] = None,
+                 note_store: LabelNoteStore = None,
+                 can_edit_note: Callable[[], bool] = None):
         super().__init__(parent, text='标签类别', padding=4)
 
         self._label_manager = label_manager
@@ -26,6 +29,8 @@ class LabelPanel(ttk.LabelFrame):
         self._on_sort_mode_changed = on_sort_mode_changed
         self._default_export_path = default_export_path
         self._on_labels_exported = on_labels_exported
+        self._note_store = note_store
+        self._can_edit_note = can_edit_note
         self._suppress_select_event = False
         self._visible_labels: List[LabelDef] = []
 
@@ -61,6 +66,7 @@ class LabelPanel(ttk.LabelFrame):
         self._listbox.config(yscrollcommand=scrollbar.set)
 
         self._listbox.bind('<<ListboxSelect>>', self._on_select)
+        self._listbox.bind('<Double-Button-1>', self._edit_note)
 
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill='x', pady=(4, 0))
@@ -103,12 +109,12 @@ class LabelPanel(ttk.LabelFrame):
 
     def refresh(self, select_class_id: int = None):
         """Refresh the label list, applying current search filter."""
-        query = self._search_var.get().strip().lower()
+        query = self._search_var.get().strip().casefold()
         all_labels = self._label_manager.labels_for_display()
         if query:
             self._visible_labels = [
                 label for label in all_labels
-                if query in label.name.lower()
+                if self._label_matches_query(label, query)
             ]
         else:
             self._visible_labels = list(all_labels)
@@ -116,6 +122,10 @@ class LabelPanel(ttk.LabelFrame):
         self._listbox.delete(0, 'end')
         for label in self._visible_labels:
             text = f'[{label.class_id}] {label.name}'
+            if self._note_store:
+                note = self._note_store.get(label.name)
+                if note:
+                    text += f' {note}'
             self._listbox.insert('end', text)
             self._listbox.itemconfig(
                 'end', fg=label.color,
@@ -132,6 +142,14 @@ class LabelPanel(ttk.LabelFrame):
                 self._listbox.selection_set(i)
                 self._listbox.see(i)
                 break
+
+    def _label_matches_query(self, label: LabelDef, query: str) -> bool:
+        """Match display search against the original name or its optional note."""
+        if query in label.name.casefold():
+            return True
+        if self._note_store:
+            return query in self._note_store.get(label.name).casefold()
+        return False
 
     def highlight_class(self, class_id: int):
         """Highlight a class in the list without triggering selection callback."""
@@ -154,6 +172,53 @@ class LabelPanel(ttk.LabelFrame):
             self._label_manager.current_class_id = label.class_id
             if self._on_class_selected:
                 self._on_class_selected(label.class_id)
+
+    def _edit_note(self, event=None):
+        if self._note_store is None:
+            return
+        if self._can_edit_note and not self._can_edit_note():
+            return
+
+        selection = self._listbox.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if not (0 <= index < len(self._visible_labels)):
+            return
+        label = self._visible_labels[index]
+
+        dialog = tk.Toplevel(self)
+        dialog.title('标签备注')
+        ttk.Label(
+            dialog,
+            text=f'[{label.class_id}] {label.name}',
+            font=('Microsoft YaHei UI', 10, 'bold'),
+        ).pack(anchor='w', padx=14, pady=(12, 6))
+        ttk.Label(dialog, text='备注:').pack(anchor='w', padx=14)
+        note_entry = ttk.Entry(dialog, width=36)
+        note_entry.pack(fill='x', padx=14, pady=(3, 8))
+        note_entry.insert(0, self._note_store.get(label.name))
+        note_entry.focus_set()
+        note_entry.select_range(0, tk.END)
+
+        def save_note():
+            try:
+                self._note_store.set(label.name, note_entry.get())
+            except OSError as error:
+                showerror(self, '保存失败', f'无法保存标签备注:\n{error}')
+                return
+            self.refresh(select_class_id=label.class_id)
+            dialog.destroy()
+
+        note_entry.bind('<Return>', lambda e: save_note())
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill='x', padx=14, pady=(0, 12))
+        ttk.Button(button_frame, text='保存', command=save_note, width=10).pack(side='right')
+        ttk.Button(button_frame, text='取消', command=dialog.destroy, width=10).pack(
+            side='right', padx=(0, 6),
+        )
+        setup_modal_dialog(dialog, self, 380, 155)
+        return 'break'
 
     def _add_label(self):
         dialog = tk.Toplevel(self)
