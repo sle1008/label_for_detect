@@ -246,6 +246,18 @@ class Project:
                 return idx
         return None
 
+    def adjacent_visible_item_for_removal(self, full_index: int) -> Optional[ImageItem]:
+        """Pick the visible next item, or the previous item when removing the last."""
+        indices = self.get_visible_indices()
+        if full_index not in indices:
+            return None
+        position = indices.index(full_index)
+        if position + 1 < len(indices):
+            return self.image_list[indices[position + 1]]
+        if position > 0:
+            return self.image_list[indices[position - 1]]
+        return None
+
     def remove_image_at(self, index: int) -> int:
         """Remove an image from the list. Returns the new current_index."""
         if not (0 <= index < len(self.image_list)):

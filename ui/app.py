@@ -609,6 +609,11 @@ class AnnotationApp(tk.Tk):
             return
 
         item = self._project.image_list[full_index]
+        was_current = full_index == self._project.current_index
+        adjacent_item = (
+            self._project.adjacent_visible_item_for_removal(full_index)
+            if was_current else None
+        )
         display_name = self._format_image_path(item)
         if not askyesno(
             self, '删除本图',
@@ -630,8 +635,20 @@ class AnnotationApp(tk.Tk):
         item.is_loaded = False
         self._filter_status_snapshot.pop(id(item), None)
 
-        was_current = full_index == self._project.current_index
         self._project.remove_image_at(full_index)
+
+        if was_current:
+            if adjacent_item is None:
+                self._project.current_index = -1
+            else:
+                adjacent_index = next(
+                    (
+                        index for index, candidate in enumerate(self._project.image_list)
+                        if candidate is adjacent_item
+                    ),
+                    -1,
+                )
+                self._project.current_index = adjacent_index
         self._refresh_image_list_view(jump='keep', navigate=False)
 
         if not self._project.image_list:
@@ -642,13 +659,12 @@ class AnnotationApp(tk.Tk):
             return
 
         if was_current:
-            indices = self._project.get_filtered_indices()
-            idx = self._project.current_index
-            if self._project.image_filter != ImageFilter.ALL and idx not in indices and indices:
-                next_idx = self._project.next_filtered_index_after(idx)
-                if next_idx is not None:
-                    self._project.goto_image(next_idx)
-            self._show_current_image_async()
+            if self._project.current_image is None:
+                self._canvas.clear_all()
+                self._box_list_panel.set_image(None)
+                self._update_window_title()
+            else:
+                self._show_current_image_async(clear_canvas=False)
         else:
             self._thumb_panel.set_current_by_full_index(self._project.current_index)
 
@@ -1922,7 +1938,7 @@ class AnnotationApp(tk.Tk):
         if self._project.goto_image(index):
             self._show_current_image_async()
     
-    def _show_current_image_async(self):
+    def _show_current_image_async(self, clear_canvas: bool = True):
         """Display current image using async loading (non-blocking)."""
         item = self._project.current_image
         if not item:
@@ -1934,13 +1950,17 @@ class AnnotationApp(tk.Tk):
             return
         
         # Load asynchronously
-        self._canvas.clear_all()
+        if clear_canvas:
+            self._canvas.clear_all()
         self._status_bar.info(f'正在加载: {item.name}')
         
         def _on_loaded(image_item, success):
             if success and self._project.current_image == image_item:
                 self._display_current_image()
             elif not success:
+                if self._project.current_image is image_item:
+                    self._canvas.clear_all()
+                    self._box_list_panel.set_image(None)
                 self._status_bar.error(f'加载失败: {image_item.name}')
         
         self._image_loader.load_image_async(

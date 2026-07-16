@@ -358,6 +358,34 @@ class ProjectFilterTests(unittest.TestCase):
         self.assertEqual(project.current_index, 1)
         self.assertEqual(project.image_list[1].name, '2.jpg')
 
+    def test_removal_neighbor_prefers_next_visible_item(self):
+        project = Project()
+        paths = [Path(f'{i}.jpg') for i in range(4)]
+        project.set_image_paths('.', paths)
+        project.set_visible_indices([0, 2, 3])
+
+        neighbor = project.adjacent_visible_item_for_removal(2)
+
+        self.assertIs(neighbor, project.image_list[3])
+
+    def test_removal_neighbor_uses_previous_for_last_visible_item(self):
+        project = Project()
+        paths = [Path(f'{i}.jpg') for i in range(4)]
+        project.set_image_paths('.', paths)
+        project.set_visible_indices([0, 2, 3])
+
+        neighbor = project.adjacent_visible_item_for_removal(3)
+
+        self.assertIs(neighbor, project.image_list[2])
+
+    def test_removal_neighbor_is_empty_for_only_visible_item(self):
+        project = Project()
+        paths = [Path(f'{i}.jpg') for i in range(4)]
+        project.set_image_paths('.', paths)
+        project.set_visible_indices([2])
+
+        self.assertIsNone(project.adjacent_visible_item_for_removal(2))
+
     def test_resolve_refresh_index_keeps_current(self):
         paths = [Path('a.jpg'), Path('b.jpg'), Path('c.jpg')]
         idx = Project.resolve_refresh_index(
