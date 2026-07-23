@@ -18,7 +18,11 @@ from core.config import AppConfig, ConfigManager
 from core.label_notes import DEFAULT_LABEL_NOTES, LabelNoteStore
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.annotation_writer import write_yolo_annotations_atomic
-from io_ops.annotation_status import infer_label_category_from_annotations, annotation_file_contains_class
+from io_ops.annotation_status import (
+    infer_label_category_from_annotations,
+    annotation_file_contains_class,
+    preferred_annotation_txt_path,
+)
 from utils.geometry import yolo_to_pixel, pixel_to_yolo
 
 
@@ -74,6 +78,49 @@ class AnnotationFileTests(unittest.TestCase):
             anns = load_annotation_file(img, mgr, img_width=100, img_height=100)
             self.assertEqual(len(anns), 1)
             self.assertEqual(anns[0].class_id, 0)
+
+    def test_load_yolo_annotation_from_sibling_labels_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'local_animal_collections'
+            image_dir = root / 'images'
+            label_dir = root / 'labels'
+            image_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            image = image_dir / 'animal.jpg'
+            image.write_bytes(b'fake')
+            (label_dir / 'animal.txt').write_text(
+                '0 0.5 0.5 0.4 0.4\n', encoding='utf-8',
+            )
+
+            mgr = LabelManager()
+            mgr.add_label('animal')
+            annotations = load_annotation_file(
+                image, mgr, img_width=100, img_height=100,
+            )
+
+            self.assertEqual(len(annotations), 1)
+            self.assertEqual(annotations[0].class_id, 0)
+
+    def test_scans_nested_sibling_labels_directory_by_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'local_animal_collections'
+            image_dir = root / 'images' / 'camera_a'
+            label_dir = root / 'labels' / 'exported' / 'camera_a'
+            image_dir.mkdir(parents=True)
+            label_dir.mkdir(parents=True)
+            image = image_dir / 'animal.jpg'
+            image.write_bytes(b'fake')
+            (label_dir / 'animal.txt').write_text(
+                '0 0.5 0.5 0.4 0.4\n', encoding='utf-8',
+            )
+
+            mgr = LabelManager()
+            mgr.add_label('animal')
+            annotations = load_annotation_file(
+                image, mgr, img_width=100, img_height=100,
+            )
+
+            self.assertEqual(len(annotations), 1)
 
     def test_infer_dominant_label_category(self):
         self.assertEqual(
@@ -160,13 +207,13 @@ class AnnotationFileTests(unittest.TestCase):
             self.assertFalse((root / 'test' / 'images' / 'labels').exists())
             self.assertFalse((root / 'test' / 'images' / 'new_class').exists())
 
-    def test_annotation_save_without_existing_file_creates_sidecar_only(self):
+    def test_annotation_save_without_existing_file_creates_mirrored_label(self):
         from ui.app import AnnotationApp
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            image_dir = root / 'images'
-            image_dir.mkdir()
+            image_dir = root / 'images' / 'camera_a'
+            image_dir.mkdir(parents=True)
             image_path = image_dir / 'sample.jpg'
             image_path.write_bytes(b'fake')
 
@@ -178,8 +225,52 @@ class AnnotationFileTests(unittest.TestCase):
             app = SimpleNamespace(_last_save_error='', _project=project)
 
             self.assertTrue(AnnotationApp._save_item_annotations(app, item))
-            self.assertTrue(image_path.with_suffix('.txt').exists())
-            self.assertFalse((root / 'labels').exists())
+            self.assertTrue((root / 'labels' / 'camera_a' / 'sample.txt').exists())
+            self.assertFalse(image_path.with_suffix('.txt').exists())
+
+    def test_preferred_path_supports_img_folder_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / 'img' / 'train' / 'sample.jpg'
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b'fake')
+
+            self.assertEqual(
+                preferred_annotation_txt_path(image_path),
+                root / 'labels' / 'train' / 'sample.txt',
+            )
+
+    def test_batch_prediction_replaces_existing_annotations_and_file(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / 'images'
+            label_dir = root / 'labels'
+            image_dir.mkdir()
+            label_dir.mkdir()
+            image_path = image_dir / 'sample.jpg'
+            image_path.write_bytes(b'fake')
+            label_path = label_dir / 'sample.txt'
+            label_path.write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+            old_box = BBox(10, 10, 20, 20, 0, 'old')
+            new_box = BBox(30, 30, 60, 60, 1, 'new')
+            item = ImageItem(
+                path=image_path, width=100, height=100,
+                annotations=[old_box], _annotations_loaded=True,
+            )
+            project = Project()
+            app = SimpleNamespace(_last_save_error='', _project=project)
+            app._save_item_annotations = lambda target: AnnotationApp._save_item_annotations(app, target)
+
+            AnnotationApp._apply_batch_annotations_to_item(app, item, [new_box])
+
+            self.assertEqual(len(item.annotations), 1)
+            self.assertEqual(item.annotations[0].class_id, 1)
+            self.assertEqual(
+                label_path.read_text(encoding='utf-8'),
+                new_box.to_yolo(100, 100) + '\n',
+            )
 
 
 class ProjectScanTests(unittest.TestCase):

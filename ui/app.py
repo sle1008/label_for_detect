@@ -2310,10 +2310,9 @@ class AnnotationApp(tk.Tk):
                 print(f"Failed to read image size for {item.path}: {e}")
                 return False
         
-        txt_path = resolve_annotation_txt_path(item.path)
-        if txt_path is None:
-            txt_path = item.path.with_suffix('.txt')
+        txt_path = preferred_annotation_txt_path(item.path)
         try:
+            txt_path.parent.mkdir(parents=True, exist_ok=True)
             write_yolo_annotations_atomic(txt_path, item.annotations, w, h)
             item.mark_clean()
             self._project.cache_label_contains(
@@ -2457,31 +2456,33 @@ class AnnotationApp(tk.Tk):
             
             count = len(annotations)
             time_text = format_duration(elapsed)
-            
-            if annotations:
-                def execute():
-                    for ann in annotations:
-                        item.add_annotation(ann.copy())
-                    self._canvas.refresh()
-                    self._on_annotation_changed()
-                
-                def undo():
-                    for ann in annotations:
-                        if ann in item.annotations:
-                            item.annotations.remove(ann)
-                    item.mark_dirty()
-                    self._canvas.refresh()
-                    self._on_annotation_changed()
-                
-                self._mark_real_annotation_change(item)
-                cmd = Command(
-                    description=f'预标注 {count} 个框',
-                    execute=execute, undo=undo,
-                )
-                self._current_image_undo_manager().execute(cmd)
-            
+            previous_annotations = [ann.copy() for ann in item.annotations]
+
+            def replace_annotations(values):
+                item.annotations = [ann.copy() for ann in values]
+                item.mark_dirty()
+                self._canvas.refresh()
+                self._on_annotation_changed()
+
+            def execute():
+                replace_annotations(annotations)
+
+            def undo():
+                replace_annotations(previous_annotations)
+
+            self._mark_real_annotation_change(item)
+            cmd = Command(
+                description=f'预标注替换为 {count} 个框',
+                execute=execute, undo=undo,
+            )
+            self._current_image_undo_manager().execute(cmd)
+
+            if not self._save_item_annotations(item):
+                self._report_save_failure(item)
+                return
+
             self._status_bar.success(
-                f'预标注完成: {count} 个目标, 耗时 {time_text}'
+                f'预标注完成并已覆盖保存: {count} 个目标, 耗时 {time_text}'
             )
         
         self._pre_annotator.predict_async(
@@ -2490,11 +2491,8 @@ class AnnotationApp(tk.Tk):
         )
     
     def _apply_batch_annotations_to_item(self, item: ImageItem, annotations: list):
-        """Merge batch prediction results into one image item."""
-        if not annotations:
-            return
-        for ann in annotations:
-            item.add_annotation(ann.copy())
+        """Replace one image's annotations with its batch prediction result."""
+        item.annotations = [ann.copy() for ann in annotations]
         item.mark_dirty()
         item._annotations_loaded = True
         self._save_item_annotations(item)

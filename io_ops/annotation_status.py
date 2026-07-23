@@ -16,7 +16,7 @@ VALID_IMAGE_CATEGORIES = frozenset({
     IMAGE_CATEGORY_UNANNOTATED,
     IMAGE_CATEGORY_UNCERTAIN,
 })
-IMAGE_FOLDER_NAMES = frozenset({'images', 'image', 'imgs'})
+IMAGE_FOLDER_NAMES = frozenset({'images', 'image', 'imgs', 'img'})
 
 
 def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
@@ -28,17 +28,27 @@ def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
     grandparent = parent.parent
     great_grandparent = grandparent.parent
 
-    # YOLO flat split: test/images/img.jpg -> test/labels/img.txt
+    # Legacy fixed-depth layouts kept ahead of generalized discovery so the
+    # existing path preference remains unchanged.
     paths.append(grandparent / 'labels' / stem_txt)
-
-    # YOLO class-subfolder split:
-    # test/images/class/img.jpg -> test/labels/img.txt
     paths.append(great_grandparent / 'labels' / stem_txt)
-
-    # YOLO mirrored class folders:
-    # test/images/class/img.jpg -> test/labels/class/img.txt
     paths.append(grandparent / 'labels' / parent.name / stem_txt)
     paths.append(great_grandparent / 'labels' / parent.name / stem_txt)
+
+    # Find an image root such as dataset/images at any nesting depth, then
+    # inspect its sibling dataset/labels directory. Support both a flat labels
+    # directory and one mirroring the relative folders below images.
+    for image_root in (parent, *parent.parents):
+        if image_root.name.lower() not in IMAGE_FOLDER_NAMES:
+            continue
+        labels_root = image_root.parent / 'labels'
+        paths.append(labels_root / stem_txt)
+        try:
+            relative_path = image_path.relative_to(image_root).with_suffix('.txt')
+            paths.append(labels_root / relative_path)
+        except ValueError:
+            pass
+        break
 
     unique_paths = []
     seen = set()
@@ -50,29 +60,50 @@ def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
     return unique_paths
 
 
+def _sibling_labels_directory(image_path: Path) -> Optional[Path]:
+    """Find the labels directory beside the nearest images ancestor."""
+    for ancestor in image_path.parents:
+        if ancestor.name.lower() in IMAGE_FOLDER_NAMES:
+            labels_dir = ancestor.parent / 'labels'
+            if labels_dir.is_dir():
+                return labels_dir
+    return None
+
+
 def resolve_annotation_txt_path(image_path: Path) -> Optional[Path]:
     """Return the YOLO label file path for an image, if it exists."""
     for txt_path in candidate_annotation_txt_paths(image_path):
-        if txt_path.exists():
+        if txt_path.is_file():
             return txt_path
+
+    # Fallback for datasets whose labels directory uses a deeper or otherwise
+    # non-mirrored subfolder layout: scan the labels directory beside images.
+    labels_dir = _sibling_labels_directory(image_path)
+    if labels_dir is not None:
+        target_name = image_path.stem.lower() + '.txt'
+        try:
+            matches = sorted(
+                path for path in labels_dir.rglob('*')
+                if path.is_file() and path.name.lower() == target_name
+            )
+        except OSError:
+            matches = []
+        if matches:
+            return matches[0]
     return None
 
 
 def preferred_annotation_txt_path(image_path: Path) -> Path:
-    """Return where a new YOLO label file should be written for an image."""
+    """Return the existing label path or a mirrored path under sibling labels."""
     existing = resolve_annotation_txt_path(image_path)
     if existing is not None:
         return existing
 
-    parent = image_path.parent
-    grandparent = parent.parent
-    great_grandparent = grandparent.parent
-    stem_txt = image_path.stem + '.txt'
-
-    if grandparent.name.lower() in IMAGE_FOLDER_NAMES:
-        return great_grandparent / 'labels' / stem_txt
-    if parent.name.lower() in IMAGE_FOLDER_NAMES:
-        return grandparent / 'labels' / stem_txt
+    for image_root in image_path.parents:
+        if image_root.name.lower() not in IMAGE_FOLDER_NAMES:
+            continue
+        relative_path = image_path.relative_to(image_root).with_suffix('.txt')
+        return image_root.parent / 'labels' / relative_path
 
     return image_path.with_suffix('.txt')
 
