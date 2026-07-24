@@ -444,6 +444,23 @@ class ProjectFilterTests(unittest.TestCase):
             project.goto_image(2)
             self.assertEqual(project.get_filtered_indices(), [0, 2])
 
+    def test_unannotated_does_not_keep_previously_annotated_current_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'a.jpg'
+            image.write_bytes(b'x')
+            (root / 'a.txt').write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root), [image])
+            project.image_filter = ImageFilter.UNANNOTATED
+            item = project.current_image
+            from core.annotation import BBox
+            item.add_annotation(BBox(class_id=0, class_name='deer', x1=10, y1=10, x2=50, y2=50))
+            item.mark_clean()
+
+            self.assertEqual(project.get_filtered_indices(), [])
+
     def test_filter_cache_reuses_indices(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

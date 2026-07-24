@@ -241,7 +241,7 @@ class Project:
             return False
         if get_image_category(item) != IMAGE_CATEGORY_ANNOTATED:
             return False
-        return item.annotation_count() > 0
+        return item.is_dirty and item.annotation_count() > 0
 
     def matches_image_filter(self, index: int, item: ImageItem) -> bool:
         status_matches = self.image_filter == ImageFilter.ALL
