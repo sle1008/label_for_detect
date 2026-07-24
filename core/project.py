@@ -1,8 +1,9 @@
 """Project state management."""
 
+import json
 import os
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -43,6 +44,7 @@ class Project:
     _label_contains_cache: dict = field(default_factory=dict, repr=False)
     _filtered_indices_cache: Optional[List[int]] = field(default=None, repr=False)
     _visible_indices_snapshot: Optional[List[int]] = field(default=None, repr=False)
+    _coco_annotated_images: set = field(default_factory=set, repr=False)
     
     @property
     def current_image(self) -> Optional[ImageItem]:
@@ -92,8 +94,67 @@ class Project:
         self.image_list = [ImageItem(path=p) for p in paths]
         self.current_index = 0 if self.image_list else -1
         self._visible_indices_snapshot = None
+        self._coco_annotated_images = self._load_coco_annotation_index()
         self.invalidate_filter_cache()
         return len(self.image_list)
+
+    def _candidate_coco_json_paths(self) -> List[Path]:
+        """Return nearby JSON files that may contain a COCO dataset index."""
+        if self.image_dir is None:
+            return []
+        roots = [self.image_dir]
+        if self.image_dir.parent != self.image_dir:
+            roots.append(self.image_dir.parent)
+        paths = set()
+        for root in roots:
+            try:
+                paths.update(path for path in root.glob('*.json') if path.is_file())
+                annotations_dir = root / 'annotations'
+                if annotations_dir.is_dir():
+                    paths.update(path for path in annotations_dir.glob('*.json') if path.is_file())
+            except OSError:
+                continue
+        return sorted(paths)
+
+    def _load_coco_annotation_index(self) -> set:
+        """Build one in-memory index of image paths present in valid COCO JSON."""
+        annotated = set()
+        for json_path in self._candidate_coco_json_paths():
+            try:
+                with open(json_path, 'r', encoding='utf-8-sig') as f:
+                    data = json.load(f)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            images = data.get('images') if isinstance(data, dict) else None
+            annotations = data.get('annotations') if isinstance(data, dict) else None
+            if not isinstance(images, list) or not isinstance(annotations, list):
+                continue
+            image_ids = {
+                annotation.get('image_id') for annotation in annotations
+                if isinstance(annotation, dict) and 'image_id' in annotation
+            }
+            for image in images:
+                if not isinstance(image, dict) or image.get('id') not in image_ids:
+                    continue
+                file_name = image.get('file_name')
+                if not isinstance(file_name, str) or not file_name.strip():
+                    continue
+                normalized = PurePosixPath(file_name.replace('\\', '/')).as_posix().lower()
+                annotated.add(normalized)
+                annotated.add(PurePosixPath(normalized).name)
+        return annotated
+
+    def _has_coco_annotation(self, item: ImageItem) -> bool:
+        if not self._coco_annotated_images:
+            return False
+        candidates = {item.path.name.lower()}
+        if self.image_dir is not None:
+            try:
+                relative = item.path.relative_to(self.image_dir)
+                candidates.add(PurePosixPath(relative.as_posix()).as_posix().lower())
+            except ValueError:
+                pass
+        return bool(candidates & self._coco_annotated_images)
 
     def invalidate_filter_cache(self):
         self._filtered_indices_cache = None
@@ -186,6 +247,8 @@ class Project:
         status_matches = self.image_filter == ImageFilter.ALL
         if not status_matches:
             category = get_image_category(item)
+            if category == IMAGE_CATEGORY_UNANNOTATED and self._has_coco_annotation(item):
+                category = IMAGE_CATEGORY_ANNOTATED
             status_matches = category == self.image_filter.value
             if not status_matches:
                 status_matches = self.lingers_in_unannotated_while_editing(index, item)

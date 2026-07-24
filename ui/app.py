@@ -1571,7 +1571,7 @@ class AnnotationApp(tk.Tk):
         if class_id is None:
             return ''
         if class_id == LABEL_FILTER_BACKGROUND:
-            return '无标签 (背景)'
+            return '背景（无标签）'
         return self._label_manager.get_name(class_id)
 
     def _classification_status_label(self, item: ImageItem) -> str:
@@ -1718,7 +1718,7 @@ class AnnotationApp(tk.Tk):
 
     def _rebuild_label_filter_menu(self):
         from core.project import LABEL_FILTER_BACKGROUND
-        BACKGROUND_TEXT = '无标签 (背景)'
+        BACKGROUND_TEXT = '背景（无标签）'
 
         self._label_filter_menu.delete(0, 'end')
         self._label_filter_display_to_id = {'全部标签': None, BACKGROUND_TEXT: LABEL_FILTER_BACKGROUND}
@@ -1810,7 +1810,7 @@ class AnnotationApp(tk.Tk):
         if class_id is None:
             self._label_filter_menu_current = '全部标签'
         elif class_id == LABEL_FILTER_BACKGROUND:
-            self._label_filter_menu_current = '无标签 (背景)'
+            self._label_filter_menu_current = '背景（无标签）'
         else:
             self._label_filter_menu_current = next(
                 (text for text, cid in self._label_filter_display_to_id.items() if cid == class_id),

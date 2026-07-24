@@ -17,6 +17,7 @@ VALID_IMAGE_CATEGORIES = frozenset({
     IMAGE_CATEGORY_UNCERTAIN,
 })
 IMAGE_FOLDER_NAMES = frozenset({'images', 'image', 'imgs', 'img'})
+ANNOTATION_STATUS_EXTENSIONS = ('.txt', '.xml')
 
 
 def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
@@ -70,14 +71,25 @@ def _sibling_labels_directory(image_path: Path) -> Optional[Path]:
     return None
 
 
-def resolve_annotation_txt_path(image_path: Path) -> Optional[Path]:
-    """Return the YOLO label file path for an image, if it exists."""
+def resolve_annotation_txt_path(
+    image_path: Path,
+    scan_fallback: bool = True,
+) -> Optional[Path]:
+    """Return the YOLO label file path for an image, if it exists.
+
+    ``scan_fallback=False`` checks only deterministic candidate paths. It is
+    intended for hot paths such as filtering or batch saves, where recursively
+    scanning a large labels tree once per image would block the UI.
+    """
     for txt_path in candidate_annotation_txt_paths(image_path):
         if txt_path.is_file():
             return txt_path
 
-    # Fallback for datasets whose labels directory uses a deeper or otherwise
-    # non-mirrored subfolder layout: scan the labels directory beside images.
+    if not scan_fallback:
+        return None
+
+    # Compatibility fallback for datasets whose labels directory uses a deeper
+    # or otherwise non-mirrored subfolder layout.
     labels_dir = _sibling_labels_directory(image_path)
     if labels_dir is not None:
         target_name = image_path.stem.lower() + '.txt'
@@ -95,7 +107,7 @@ def resolve_annotation_txt_path(image_path: Path) -> Optional[Path]:
 
 def preferred_annotation_txt_path(image_path: Path) -> Path:
     """Return the existing label path or a mirrored path under sibling labels."""
-    existing = resolve_annotation_txt_path(image_path)
+    existing = resolve_annotation_txt_path(image_path, scan_fallback=False)
     if existing is not None:
         return existing
 
@@ -152,9 +164,24 @@ def annotation_file_contains_class(item: ImageItem, class_id: int) -> bool:
     return False
 
 
+def candidate_annotation_status_paths(image_path: Path) -> list[Path]:
+    """Return deterministic per-image annotation paths used by status filters."""
+    txt_candidates = candidate_annotation_txt_paths(image_path)
+    paths: list[Path] = []
+    seen = set()
+    for txt_path in txt_candidates:
+        for extension in ANNOTATION_STATUS_EXTENSIONS:
+            path = txt_path.with_suffix(extension)
+            key = path.absolute()
+            if key not in seen:
+                seen.add(key)
+                paths.append(path)
+    return paths
+
+
 def label_file_exists(item: ImageItem) -> bool:
-    """True when a label (.txt) file exists for the image, even if empty."""
-    return resolve_annotation_txt_path(item.path) is not None
+    """True when a same-stem per-image annotation file exists."""
+    return any(path.is_file() for path in candidate_annotation_status_paths(item.path))
 
 
 def natural_has_annotations(item: ImageItem) -> bool:

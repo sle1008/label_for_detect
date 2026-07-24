@@ -1,5 +1,6 @@
 """Core logic tests (no GUI required)."""
 
+import json
 import sys
 import tempfile
 import unittest
@@ -121,6 +122,23 @@ class AnnotationFileTests(unittest.TestCase):
             )
 
             self.assertEqual(len(annotations), 1)
+
+    def test_preferred_path_does_not_recursively_scan_labels_tree(self):
+        from io_ops.annotation_status import preferred_annotation_txt_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'images' / 'camera_a' / 'animal.jpg'
+            unrelated_label = root / 'labels' / 'exported' / 'animal.txt'
+            image.parent.mkdir(parents=True)
+            unrelated_label.parent.mkdir(parents=True)
+            image.write_bytes(b'fake')
+            unrelated_label.write_text('', encoding='utf-8')
+
+            with patch.object(Path, 'rglob', side_effect=AssertionError('recursive scan')):
+                result = preferred_annotation_txt_path(image)
+
+            self.assertEqual(result, root / 'labels' / 'camera_a' / 'animal.txt')
 
     def test_infer_dominant_label_category(self):
         self.assertEqual(
@@ -525,6 +543,83 @@ class ProjectFilterTests(unittest.TestCase):
             project = Project()
             project.set_image_paths(str(root), [img_no_label])
             project.label_filter_class_id = LABEL_FILTER_BACKGROUND
+
+            self.assertEqual(project.get_filtered_indices(), [])
+
+    def test_unannotated_ignores_recursive_compatibility_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'images' / 'camera_a' / 'animal.jpg'
+            unrelated_label = root / 'labels' / 'exported' / 'animal.txt'
+            image.parent.mkdir(parents=True)
+            unrelated_label.parent.mkdir(parents=True)
+            image.write_bytes(b'x')
+            unrelated_label.write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root / 'images'), [image])
+            project.image_filter = ImageFilter.UNANNOTATED
+
+            self.assertEqual(project.get_filtered_indices(), [0])
+
+    def test_coco_json_marks_only_images_with_annotations_as_annotated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / 'images'
+            annotations_dir = root / 'annotations'
+            image_dir.mkdir()
+            annotations_dir.mkdir()
+            annotated_image = image_dir / 'annotated.jpg'
+            background_image = image_dir / 'background.jpg'
+            annotated_image.write_bytes(b'x')
+            background_image.write_bytes(b'x')
+            coco = {
+                'images': [
+                    {'id': 1, 'file_name': 'annotated.jpg'},
+                    {'id': 2, 'file_name': 'background.jpg'},
+                ],
+                'annotations': [
+                    {'id': 10, 'image_id': 1, 'category_id': 3, 'bbox': [1, 2, 3, 4]},
+                ],
+                'categories': [{'id': 3, 'name': 'animal'}],
+            }
+            (annotations_dir / 'instances.json').write_text(
+                json.dumps(coco), encoding='utf-8',
+            )
+
+            project = Project()
+            project.set_image_paths(str(image_dir), [annotated_image, background_image])
+            project.image_filter = ImageFilter.UNANNOTATED
+
+            indices = project.get_filtered_indices()
+            self.assertEqual([project.image_list[i].name for i in indices], ['background.jpg'])
+
+    def test_same_stem_non_coco_json_does_not_change_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'images' / 'camera_a' / 'animal.jpg'
+            label = root / 'labels' / 'camera_a' / 'animal.json'
+            image.parent.mkdir(parents=True)
+            label.parent.mkdir(parents=True)
+            image.write_bytes(b'x')
+            label.write_text('{}', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root / 'images'), [image])
+            project.image_filter = ImageFilter.UNANNOTATED
+
+            self.assertEqual(project.get_filtered_indices(), [0])
+
+    def test_unannotated_excludes_same_stem_xml_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'animal.jpg'
+            image.write_bytes(b'x')
+            (root / 'animal.xml').write_text('<annotation/>', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root), [image])
+            project.image_filter = ImageFilter.UNANNOTATED
 
             self.assertEqual(project.get_filtered_indices(), [])
 
