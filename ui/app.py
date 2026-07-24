@@ -834,8 +834,10 @@ class AnnotationApp(tk.Tk):
         ):
             dialog = RestoreDirectoryDialog(self, last_directory)
             if dialog.result == 'browse':
+                self._reset_image_filters()
                 self._open_directory()
             else:
+                self._apply_saved_image_filters()
                 self._load_directory(last_directory)
         
         # Restore weights
@@ -847,17 +849,29 @@ class AnnotationApp(tk.Tk):
         if self._config.label_mode in LABEL_MODE_CYCLE:
             self._canvas.set_label_mode(self._config.label_mode)
             self._label_mode_var.set(self._config.label_mode)
-        self._apply_saved_image_filter()
     
-    def _apply_saved_image_filter(self):
-        """Restore persisted image filter without navigating away."""
+    def _apply_saved_image_filters(self):
+        """Restore persisted status and label filters for session recovery."""
         value = getattr(self._config, 'image_filter', 'all')
         try:
             self._project.image_filter = ImageFilter(value)
         except ValueError:
             self._project.image_filter = ImageFilter.ALL
+        class_id = getattr(self._config, 'label_filter_class_id', None)
+        self._project.label_filter_class_id = class_id if isinstance(class_id, int) else None
+        self._project.invalidate_filter_cache()
         self._image_filter_var.set(self._project.image_filter.value)
         self._sync_status_filter_combo()
+        self._refresh_label_filter_options()
+
+    def _reset_image_filters(self):
+        """Reset directory-specific filters when opening another directory."""
+        self._project.image_filter = ImageFilter.ALL
+        self._project.label_filter_class_id = None
+        self._project.invalidate_filter_cache()
+        self._image_filter_var.set(ImageFilter.ALL.value)
+        self._sync_status_filter_combo()
+        self._refresh_label_filter_options()
     
     def _save_session(self):
         """Save current session settings."""
@@ -884,6 +898,7 @@ class AnnotationApp(tk.Tk):
         if sashes:
             self._config.right_pane_sash_positions = sashes
         self._config.image_filter = self._project.image_filter.value
+        self._config.label_filter_class_id = self._project.label_filter_class_id
         
         self._config_manager.save(self._config)
     
@@ -1084,10 +1099,11 @@ class AnnotationApp(tk.Tk):
     # --- File operations ---
     
     def _open_directory(self):
-        """Open image directory."""
+        """Open image directory with filters reset for the new selection."""
         initial = self._config.last_directory or os.path.expanduser('~')
         d = filedialog.askdirectory(initialdir=initial, title='选择图片目录', parent=self)
         if d:
+            self._reset_image_filters()
             self._load_directory(d)
 
     def _refresh_directory(self):
@@ -1805,6 +1821,8 @@ class AnnotationApp(tk.Tk):
             return
         self._project.label_filter_class_id = class_id
         self._project.invalidate_filter_cache()
+        self._config.label_filter_class_id = class_id
+        self._config_manager.save(self._config)
         self._refresh_label_filter_options()
         from core.project import LABEL_FILTER_BACKGROUND
         if class_id is None:

@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from utils.paths import get_app_root
 
@@ -27,6 +27,7 @@ class AppConfig:
     directory_label_files: Dict[str, str] = field(default_factory=dict)
     label_definitions: List[dict] = field(default_factory=list)
     image_filter: str = 'all'
+    label_filter_class_id: Optional[int] = None
     label_mode: str = 'full'
     box_list_column_widths: Dict[str, int] = field(default_factory=lambda: {
         'id': 30, 'class': 80, 'conf': 50, 'coords': 120,
