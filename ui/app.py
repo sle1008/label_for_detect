@@ -556,17 +556,55 @@ class AnnotationApp(tk.Tk):
     def _on_canvas_image_context_menu(self, event):
         self._show_image_context_menu(event)
 
-    def _on_image_context_menu(self, full_index: int, event):
-        self._show_image_context_menu(event, full_index=full_index)
+    def _on_image_context_menu(self, full_index: int, event, selected_indices=None):
+        self._show_image_context_menu(
+            event, full_index=full_index, selected_indices=selected_indices,
+        )
 
-    def _show_image_context_menu(self, event, full_index: int = None):
+    def _show_image_context_menu(self, event, full_index: int = None, selected_indices=None):
         if full_index is None:
             full_index = self._project.current_index
         if not (0 <= full_index < len(self._project.image_list)):
             return
 
         item = self._project.image_list[full_index]
+        selected_indices = sorted(set(selected_indices or [full_index]))
+        selected_indices = [
+            index for index in selected_indices
+            if 0 <= index < len(self._project.image_list)
+        ]
         menu = tk.Menu(self, tearoff=0)
+        if len(selected_indices) > 1:
+            count = len(selected_indices)
+            menu.add_command(
+                label=f'将所选 {count} 张设为已标注',
+                command=lambda indices=selected_indices: self._set_images_category(
+                    indices, IMAGE_CATEGORY_ANNOTATED,
+                ),
+            )
+            menu.add_command(
+                label=f'将所选 {count} 张设为未标注',
+                command=lambda indices=selected_indices: self._set_images_category(
+                    indices, IMAGE_CATEGORY_UNANNOTATED,
+                ),
+            )
+            menu.add_command(
+                label=f'将所选 {count} 张设为不确定',
+                command=lambda indices=selected_indices: self._set_images_category(
+                    indices, IMAGE_CATEGORY_UNCERTAIN,
+                ),
+            )
+            menu.add_separator()
+            menu.add_command(
+                label=f'删除所选 {count} 张',
+                command=lambda indices=selected_indices: self._delete_images(indices),
+            )
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
+
         category = get_image_category(item)
         if category == IMAGE_CATEGORY_ANNOTATED:
             toggle_label = '设为未标注'
@@ -597,6 +635,47 @@ class AnnotationApp(tk.Tk):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _delete_images(self, indices):
+        indices = sorted(set(indices), reverse=True)
+        if not indices:
+            return
+        if not askyesno(
+            self, '删除所选图片',
+            f'确定从本地删除所选 {len(indices)} 张图片及其标注文件吗？\n\n此操作不可撤销。',
+        ):
+            return
+        if not self._save_before_navigate():
+            return
+
+        failed = []
+        for index in indices:
+            if not (0 <= index < len(self._project.image_list)):
+                continue
+            item = self._project.image_list[index]
+            ok, err = delete_image_and_labels(item)
+            if not ok:
+                failed.append(self._format_image_path(item))
+                continue
+            self._image_loader.evict_path(item.path)
+            self._filter_status_snapshot.pop(id(item), None)
+            self._project.remove_image_at(index)
+
+        if self._project.image_list:
+            self._project.current_index = min(
+                max(0, self._project.current_index), len(self._project.image_list) - 1,
+            )
+            self._refresh_image_list_view(jump='keep', navigate=False)
+            self._show_current_image_async(clear_canvas=False)
+        else:
+            self._canvas.clear_all()
+            self._box_list_panel.set_image(None)
+            self._thumb_panel.clear()
+            self._update_window_title()
+        if failed:
+            self._status_bar.warning(f'已删除部分图片，{len(failed)} 张删除失败')
+        else:
+            self._status_bar.success(f'已删除 {len(indices)} 张图片')
 
     def _delete_current_image_shortcut(self, event=None):
         """Delete the currently displayed image (Ctrl+Del)."""
@@ -672,6 +751,48 @@ class AnnotationApp(tk.Tk):
             self._status_bar.warning(f'已删除图片，但部分标注文件未删除: {err}')
         else:
             self._status_bar.success(f'已删除: {display_name}')
+
+    def _set_images_category(self, indices, category: str):
+        indices = sorted(set(indices))
+        labels = {
+            IMAGE_CATEGORY_ANNOTATED: '已标注',
+            IMAGE_CATEGORY_UNANNOTATED: '未标注',
+            IMAGE_CATEGORY_UNCERTAIN: '不确定',
+        }
+        changed = 0
+        for index in indices:
+            if not (0 <= index < len(self._project.image_list)):
+                continue
+            item = self._project.image_list[index]
+            if category == IMAGE_CATEGORY_UNANNOTATED:
+                item.clear_annotations()
+                delete_annotation_files(item.path)
+                item.manual_annotation_status = None
+                item._annotations_loaded = True
+                item.mark_clean()
+            elif category == IMAGE_CATEGORY_ANNOTATED:
+                item.manual_annotation_status = None
+                item._annotations_loaded = True
+                item.mark_dirty()
+                if not self._save_item_annotations(item):
+                    self._report_save_failure(item)
+                    continue
+            elif category == IMAGE_CATEGORY_UNCERTAIN:
+                item.manual_annotation_status = IMAGE_CATEGORY_UNCERTAIN
+            else:
+                return
+            invalidate_annotation_status(item)
+            self._filter_status_snapshot[id(item)] = get_image_category(item)
+            changed += 1
+
+        self._save_manual_statuses()
+        self._project.invalidate_filter_cache()
+        self._refresh_image_list_view(jump='keep', navigate=False)
+        current = self._project.current_image
+        if current:
+            self._canvas.refresh()
+            self._box_list_panel.refresh()
+            self._status_bar.set_info(f'已将 {changed} 张图片设为{labels[category]}')
 
     def _set_image_category(self, full_index: int, category: str):
         if not (0 <= full_index < len(self._project.image_list)):

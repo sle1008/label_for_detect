@@ -194,6 +194,8 @@ class ThumbnailPanel(tk.Frame):
 
             exportselection=False,
 
+            selectmode=tk.EXTENDED,
+
             relief='flat',
 
             bd=0,
@@ -417,8 +419,15 @@ class ThumbnailPanel(tk.Frame):
 
     def _on_right_click(self, event):
         index = self._listbox.nearest(event.y)
-        if 0 <= index < len(self._image_list) and self._on_context_menu:
-            self._on_context_menu(self._full_index_at(index), event)
+        if not (0 <= index < len(self._image_list)):
+            return
+        selection = self._listbox.curselection()
+        if index not in selection:
+            self._listbox.selection_clear(0, 'end')
+            self._listbox.selection_set(index)
+        if self._on_context_menu:
+            selected = [self._full_index_at(i) for i in self._listbox.curselection()]
+            self._on_context_menu(self._full_index_at(index), event, selected)
 
     def set_path_formatter(self, formatter: Callable[[ImageItem], str]):
 
@@ -492,7 +501,9 @@ class ThumbnailPanel(tk.Frame):
 
             return
 
-        index = selection[0]
+        index = self._listbox.index('active')
+        if index not in selection:
+            index = selection[-1]
 
         if 0 <= index < len(self._image_list):
 
@@ -556,9 +567,10 @@ class ThumbnailPanel(tk.Frame):
 
         try:
 
-            self._listbox.selection_clear(0, 'end')
-
-            self._listbox.selection_set(index)
+            selection = self._listbox.curselection()
+            if len(selection) <= 1 or index not in selection:
+                self._listbox.selection_clear(0, 'end')
+                self._listbox.selection_set(index)
 
             self._listbox.see(index)
 
