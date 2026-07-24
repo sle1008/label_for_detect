@@ -14,6 +14,14 @@ from io_ops.annotation_status import (
 )
 from utils.constants import IMAGE_EXTENSIONS
 
+# Sentinel stored in _label_contains_cache for images whose label file exists
+# but contains no boxes (YOLO background sample).  Distinct from plain set()
+# which is used when no label file exists at all.
+_BACKGROUND_ENTRY = object()
+
+# Public sentinel value for label_filter_class_id meaning "background only".
+LABEL_FILTER_BACKGROUND = -1
+
 
 class ImageFilter(Enum):
     ALL = 'all'
@@ -95,11 +103,49 @@ class Project:
         self._filtered_indices_cache = None
 
     def cache_label_contains(self, path: Path, class_ids: set):
+        # An empty set means "no label file".  Use _BACKGROUND_ENTRY to record
+        # "label file exists but has no boxes" so the background filter works.
         self._label_contains_cache[str(path.resolve())] = set(class_ids)
+
+    def cache_background(self, path: Path):
+        """Record that the image has a label file that contains no boxes."""
+        self._label_contains_cache[str(path.resolve())] = _BACKGROUND_ENTRY
+
+    def _is_background_item(self, item: ImageItem) -> bool:
+        """True when the image has a label file that is empty (no boxes)."""
+        key = str(item.path.resolve())
+        cached = self._label_contains_cache.get(key)
+        if cached is _BACKGROUND_ENTRY:
+            return True
+        if cached is not None:
+            return False
+        # Not yet cached – check disk now and populate cache.
+        if item._annotations_loaded or item.is_dirty:
+            return False
+        txt_path = resolve_annotation_txt_path(item.path)
+        if txt_path is None:
+            self._label_contains_cache[key] = set()
+            return False
+        class_ids: set = set()
+        try:
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts:
+                        class_ids.add(int(float(parts[0])))
+        except Exception:
+            pass
+        if class_ids:
+            self._label_contains_cache[key] = class_ids
+            return False
+        self._label_contains_cache[key] = _BACKGROUND_ENTRY
+        return True
 
     def label_contains_class(self, item: ImageItem, class_id: int) -> bool:
         key = str(item.path.resolve())
         cached = self._label_contains_cache.get(key)
+        if cached is _BACKGROUND_ENTRY:
+            return False
         if cached is not None:
             return class_id in cached
         if item.annotations:
@@ -119,7 +165,11 @@ class Project:
                         class_ids.add(int(float(parts[0])))
         except Exception:
             pass
-        self._label_contains_cache[key] = class_ids
+        if class_ids:
+            self._label_contains_cache[key] = class_ids
+        else:
+            # File exists but no boxes → background entry.
+            self._label_contains_cache[key] = _BACKGROUND_ENTRY
         return class_id in class_ids
 
     def lingers_in_unannotated_while_editing(self, index: int, item: ImageItem) -> bool:
@@ -143,6 +193,8 @@ class Project:
             return False
         if self.label_filter_class_id is None:
             return True
+        if self.label_filter_class_id == LABEL_FILTER_BACKGROUND:
+            return self._is_background_item(item)
         return self.label_contains_class(item, self.label_filter_class_id)
 
     def get_filtered_indices(self) -> List[int]:

@@ -1010,17 +1010,23 @@ class AnnotationApp(tk.Tk):
                     return
                 try:
                     class_ids = set()
+                    file_exists = False
                     if item.annotations:
                         class_ids = {ann.class_id for ann in item.annotations}
+                        file_exists = True
                     else:
                         txt = preferred_annotation_txt_path(item.path)
                         if txt.exists():
+                            file_exists = True
                             with open(txt, 'r', encoding='utf-8') as f:
                                 for line in f:
                                     parts = line.strip().split()
                                     if parts:
                                         class_ids.add(int(float(parts[0])))
-                    self._project.cache_label_contains(item.path, class_ids)
+                    if file_exists and not class_ids:
+                        self._project.cache_background(item.path)
+                    else:
+                        self._project.cache_label_contains(item.path, class_ids)
                 except Exception:
                     self._project.cache_label_contains(item.path, set())
                 if total > 0:
@@ -1560,9 +1566,12 @@ class AnnotationApp(tk.Tk):
         return ''
 
     def _label_filter_label(self) -> str:
+        from core.project import LABEL_FILTER_BACKGROUND
         class_id = self._project.label_filter_class_id
         if class_id is None:
             return ''
+        if class_id == LABEL_FILTER_BACKGROUND:
+            return '无标签 (背景)'
         return self._label_manager.get_name(class_id)
 
     def _classification_status_label(self, item: ImageItem) -> str:
@@ -1708,14 +1717,21 @@ class AnnotationApp(tk.Tk):
             self._status_filter_combo.set(labels.get(self._project.image_filter, '全部图片'))
 
     def _rebuild_label_filter_menu(self):
+        from core.project import LABEL_FILTER_BACKGROUND
+        BACKGROUND_TEXT = '无标签 (背景)'
+
         self._label_filter_menu.delete(0, 'end')
-        self._label_filter_display_to_id = {'全部标签': None}
+        self._label_filter_display_to_id = {'全部标签': None, BACKGROUND_TEXT: LABEL_FILTER_BACKGROUND}
         labels = self._label_manager.labels_for_display()
         current = self._project.label_filter_class_id
 
         self._label_filter_menu.add_radiobutton(
             label='全部标签', variable=self._label_filter_var, value='全部标签',
             command=lambda: self._apply_label_filter(None),
+        )
+        self._label_filter_menu.add_radiobutton(
+            label=BACKGROUND_TEXT, variable=self._label_filter_var, value=BACKGROUND_TEXT,
+            command=lambda: self._apply_label_filter(LABEL_FILTER_BACKGROUND),
         )
         if labels:
             self._label_filter_menu.add_separator()
@@ -1734,7 +1750,10 @@ class AnnotationApp(tk.Tk):
                 )
         self._label_filter_menu.configure(postcommand=self._sync_label_filter_menu)
 
-        if current is not None and self._label_manager.has_class(current):
+        if current == LABEL_FILTER_BACKGROUND:
+            self._label_filter_var.set(BACKGROUND_TEXT)
+            self._label_filter_menu_current = BACKGROUND_TEXT
+        elif current is not None and self._label_manager.has_class(current):
             current_text = next(
                 text for text, class_id in self._label_filter_display_to_id.items()
                 if class_id == current
@@ -1787,10 +1806,16 @@ class AnnotationApp(tk.Tk):
         self._project.label_filter_class_id = class_id
         self._project.invalidate_filter_cache()
         self._refresh_label_filter_options()
-        self._label_filter_menu_current = '全部标签' if class_id is None else next(
-            (text for text, cid in self._label_filter_display_to_id.items() if cid == class_id),
-            '全部标签',
-        )
+        from core.project import LABEL_FILTER_BACKGROUND
+        if class_id is None:
+            self._label_filter_menu_current = '全部标签'
+        elif class_id == LABEL_FILTER_BACKGROUND:
+            self._label_filter_menu_current = '无标签 (背景)'
+        else:
+            self._label_filter_menu_current = next(
+                (text for text, cid in self._label_filter_display_to_id.items() if cid == class_id),
+                '全部标签',
+            )
         self._status_bar.set_info('标签筛选更新中...')
 
         visible = len(self._project.get_filtered_indices())
@@ -2315,9 +2340,11 @@ class AnnotationApp(tk.Tk):
             txt_path.parent.mkdir(parents=True, exist_ok=True)
             write_yolo_annotations_atomic(txt_path, item.annotations, w, h)
             item.mark_clean()
-            self._project.cache_label_contains(
-                item.path, {annotation.class_id for annotation in item.annotations},
-            )
+            class_ids = {annotation.class_id for annotation in item.annotations}
+            if class_ids:
+                self._project.cache_label_contains(item.path, class_ids)
+            else:
+                self._project.cache_background(item.path)
             return True
         except Exception as e:
             self._last_save_error = str(e)

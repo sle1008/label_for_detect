@@ -496,6 +496,66 @@ class ProjectFilterTests(unittest.TestCase):
         idx = Project.resolve_refresh_index([], [Path('a.jpg')], Path('a.jpg'), 0)
         self.assertEqual(idx, -1)
 
+    def test_background_filter_matches_empty_label_file(self):
+        from core.project import LABEL_FILTER_BACKGROUND
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img_a = root / 'a.jpg'
+            img_b = root / 'b.jpg'
+            img_a.write_bytes(b'x')
+            img_b.write_bytes(b'x')
+            (root / 'a.txt').write_text('', encoding='utf-8')
+            (root / 'b.txt').write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root), sorted([img_a, img_b]))
+            project.label_filter_class_id = LABEL_FILTER_BACKGROUND
+
+            indices = project.get_filtered_indices()
+            matched = [project.image_list[i].name for i in indices]
+            self.assertEqual(matched, ['a.jpg'])
+
+    def test_background_filter_excludes_image_without_label_file(self):
+        from core.project import LABEL_FILTER_BACKGROUND
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img_no_label = root / 'no_label.jpg'
+            img_no_label.write_bytes(b'x')
+
+            project = Project()
+            project.set_image_paths(str(root), [img_no_label])
+            project.label_filter_class_id = LABEL_FILTER_BACKGROUND
+
+            self.assertEqual(project.get_filtered_indices(), [])
+
+    def test_background_cache_set_via_cache_background(self):
+        from core.project import LABEL_FILTER_BACKGROUND
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img = root / 'bg.jpg'
+            img.write_bytes(b'x')
+
+            project = Project()
+            project.set_image_paths(str(root), [img])
+            project.cache_background(img)
+            project.label_filter_class_id = LABEL_FILTER_BACKGROUND
+
+            self.assertEqual(project.get_filtered_indices(), [0])
+
+    def test_label_contains_class_unaffected_by_background_entry(self):
+        from core.project import LABEL_FILTER_BACKGROUND
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img = root / 'bg.jpg'
+            img.write_bytes(b'x')
+            (root / 'bg.txt').write_text('', encoding='utf-8')
+
+            project = Project()
+            project.set_image_paths(str(root), [img])
+            item = project.image_list[0]
+            self.assertFalse(project.label_contains_class(item, 0))
+            self.assertTrue(project._is_background_item(item))
+
 
 class AnnotationStatusTests(unittest.TestCase):
     def test_detects_label_file_without_loading_image(self):
