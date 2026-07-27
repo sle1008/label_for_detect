@@ -36,7 +36,8 @@ from ui.thumbnail_panel import ThumbnailPanel
 from ui.status_bar import StatusBar
 from ui.dialogs import (
     ExportDialog, StatisticsDialog, LabelLoadDialog, JumpToImageDialog,
-    RestoreDirectoryDialog,
+    RestoreDirectoryDialog, ImageExportModeDialog, ImageExportConflictDialog,
+    ImageExportProgressDialog,
 )
 from io_ops.annotation_status import (
     get_image_category, is_image_annotated, invalidate_annotation_status,
@@ -45,6 +46,10 @@ from io_ops.annotation_status import (
     IMAGE_CATEGORY_ANNOTATED, IMAGE_CATEGORY_UNANNOTATED, IMAGE_CATEGORY_UNCERTAIN,
 )
 from io_ops.image_files import delete_image_and_labels, delete_annotation_files
+from io_ops.image_export import (
+    CONFLICT_SUFFIX, EXPORT_MODE_COPY, EXPORT_MODE_MOVE,
+    export_images_and_labels, find_export_conflicts,
+)
 from io_ops.annotation_writer import write_yolo_annotations_atomic
 from io_ops.folder_labels import (
     detect_class_folder_layout,
@@ -98,6 +103,7 @@ class AnnotationApp(tk.Tk):
         self._main_thread_queue = queue.Queue()
         self._filter_status_snapshot = {}
         self._pending_refresh = None
+        self._image_export_running = False
         self._label_cache_ready_generation = -1
         self._label_cache_job_generation = 0
         self._label_cache_jobs = set()
@@ -596,6 +602,11 @@ class AnnotationApp(tk.Tk):
             )
             menu.add_separator()
             menu.add_command(
+                label=f'导出所选 {count} 张图片...',
+                command=lambda indices=selected_indices: self._choose_image_export(indices),
+            )
+            menu.add_separator()
+            menu.add_command(
                 label=f'删除所选 {count} 张',
                 command=lambda indices=selected_indices: self._delete_images(indices),
             )
@@ -627,6 +638,11 @@ class AnnotationApp(tk.Tk):
         )
         menu.add_separator()
         menu.add_command(
+            label='导出本图...',
+            command=lambda idx=full_index: self._choose_image_export([idx]),
+        )
+        menu.add_separator()
+        menu.add_command(
             label='删除本图',
             accelerator='Ctrl+Del',
             command=lambda idx=full_index: self._delete_image(idx),
@@ -635,6 +651,195 @@ class AnnotationApp(tk.Tk):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _choose_image_export(self, indices):
+        """Choose export mode and destination for listbox-selected images."""
+        if self._image_export_running:
+            showwarning(self, '正在导出', '已有图片导出任务正在进行，请稍候。')
+            return
+        indices = sorted(set(indices))
+        items = [
+            self._project.image_list[index]
+            for index in indices
+            if 0 <= index < len(self._project.image_list)
+        ]
+        if not items:
+            return
+
+        mode_dialog = ImageExportModeDialog(self, len(items))
+        mode = mode_dialog.result
+        if not mode:
+            return
+        initial = self._config.last_directory or os.path.expanduser('~')
+        output_dir = filedialog.askdirectory(
+            parent=self,
+            initialdir=initial,
+            title='选择导出位置（将自动创建 images 和 labels）',
+        )
+        if not output_dir:
+            return
+        conflict_policy = CONFLICT_SUFFIX
+        if mode == EXPORT_MODE_COPY:
+            conflicts = find_export_conflicts(items, Path(output_dir))
+            if conflicts:
+                conflict_dialog = ImageExportConflictDialog(self, len(conflicts))
+                conflict_policy = conflict_dialog.result
+                if not conflict_policy:
+                    return
+        if not self._save_before_navigate():
+            return
+
+        visible_items = [
+            self._project.image_list[index]
+            for index in self._project.get_visible_indices()
+            if 0 <= index < len(self._project.image_list)
+        ]
+        current_item = self._project.current_image
+        progress_dialog = ImageExportProgressDialog(self, len(items), mode)
+        self._image_export_running = True
+
+        import threading
+
+        def report_progress(completed, total, item):
+            self._main_thread_queue.put(
+                lambda done=completed, count=total, name=item.name:
+                progress_dialog.update_progress(done, count, name)
+            )
+
+        def worker():
+            try:
+                results = export_images_and_labels(
+                    items,
+                    Path(output_dir),
+                    mode=mode,
+                    progress=report_progress,
+                    conflict_policy=conflict_policy,
+                )
+                error = ''
+            except Exception as exc:
+                results = []
+                error = str(exc)
+            self._main_thread_queue.put(
+                lambda: self._finish_image_export(
+                    results, mode, Path(output_dir), visible_items,
+                    current_item, progress_dialog, error,
+                )
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+        progress_dialog.wait()
+
+    def _finish_image_export(
+        self, results, mode, output_dir, visible_items, current_item,
+        progress_dialog, worker_error='',
+    ):
+        """Apply completed export results on the Tk main thread."""
+        self._image_export_running = False
+        progress_dialog.close()
+        if worker_error:
+            showerror(self, '导出失败', f'无法完成图片导出：\n\n{worker_error}')
+            return
+
+        succeeded = [result for result in results if result.success]
+        skipped = [result for result in results if result.skipped]
+        failed = [
+            result for result in results
+            if not result.success and not result.skipped
+        ]
+        warnings = [result for result in succeeded if result.warning]
+        if mode == EXPORT_MODE_MOVE:
+            moved_items = [result.item for result in succeeded if result.source_removed]
+            self._remove_moved_export_items(moved_items, visible_items, current_item)
+            self._save_manual_statuses()
+
+        action = '移动' if mode == EXPORT_MODE_MOVE else '复制'
+        summary = f'已{action} {len(succeeded)} 张图片到：\n{output_dir}'
+        details = []
+        if failed:
+            details.append(f'{len(failed)} 张失败')
+            details.extend(
+                f'{result.item.name}: {result.error}' for result in failed[:5]
+            )
+        if skipped:
+            details.append(f'{len(skipped)} 张因同名被跳过')
+            details.extend(
+                result.item.name for result in skipped[:5]
+            )
+        if warnings:
+            details.append(f'{len(warnings)} 张存在源标签清理警告')
+            details.extend(
+                f'{result.item.name}: {result.warning}' for result in warnings[:3]
+            )
+        if details:
+            showwarning(self, '导出完成（部分异常）', summary + '\n\n' + '\n'.join(details))
+            self._status_bar.warning(
+                f'图片导出完成：成功 {len(succeeded)}，跳过 {len(skipped)}，'
+                f'异常 {len(failed) + len(warnings)}'
+            )
+        else:
+            showinfo(self, '导出完成', summary)
+            self._status_bar.success(f'已{action} {len(succeeded)} 张图片')
+
+    def _remove_moved_export_items(self, moved_items, visible_items, current_item):
+        """Remove moved sources from project state and choose a visible neighbor."""
+        moved_ids = {id(item) for item in moved_items}
+        if not moved_ids:
+            return
+        current_was_moved = current_item is not None and id(current_item) in moved_ids
+        replacement = current_item if not current_was_moved else None
+        if current_was_moved and current_item in visible_items:
+            position = visible_items.index(current_item)
+            project_item_ids = {id(item) for item in self._project.image_list}
+            remaining_visible_ids = {
+                id(item) for item in visible_items
+                if id(item) not in moved_ids and id(item) in project_item_ids
+            }
+            for item in visible_items[position + 1:]:
+                if id(item) in remaining_visible_ids:
+                    replacement = item
+                    break
+            if replacement is None:
+                for item in reversed(visible_items[:position]):
+                    if id(item) in remaining_visible_ids:
+                        replacement = item
+                        break
+
+        for index in range(len(self._project.image_list) - 1, -1, -1):
+            item = self._project.image_list[index]
+            if id(item) not in moved_ids:
+                continue
+            self._image_loader.evict_path(item.path)
+            item._pil_image = None
+            item.is_loaded = False
+            self._filter_status_snapshot.pop(id(item), None)
+            self._image_undo_managers.pop(id(item), None)
+            self._project.remove_image_at(index)
+        self._navigation_undo_stack = [
+            item for item in self._navigation_undo_stack if id(item) not in moved_ids
+        ]
+
+        replacement_index = next(
+            (
+                index for index, item in enumerate(self._project.image_list)
+                if item is replacement
+            ),
+            -1,
+        )
+        if replacement_index >= 0:
+            self._project.current_index = replacement_index
+        elif current_was_moved:
+            self._project.current_index = -1
+        self._refresh_image_list_view(jump='keep', navigate=False)
+
+        if not self._project.image_list or self._project.current_image is None:
+            self._canvas.clear_all()
+            self._box_list_panel.set_image(None)
+            self._update_window_title()
+            return
+        if current_was_moved:
+            self._show_current_image_async(clear_canvas=False)
+        else:
+            self._thumb_panel.set_current_by_full_index(self._project.current_index)
 
     def _delete_images(self, indices):
         indices = sorted(set(indices), reverse=True)
@@ -958,7 +1163,7 @@ class AnnotationApp(tk.Tk):
                 self._reset_image_filters()
                 self._open_directory()
             else:
-                self._apply_saved_image_filters()
+                self._reset_image_filters()
                 self._load_directory(last_directory)
         
         # Restore weights

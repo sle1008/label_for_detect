@@ -19,6 +19,10 @@ from core.config import AppConfig, ConfigManager
 from core.label_notes import DEFAULT_LABEL_NOTES, LabelNoteStore
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.annotation_writer import write_yolo_annotations_atomic
+from io_ops.image_export import (
+    CONFLICT_SKIP, EXPORT_MODE_COPY, EXPORT_MODE_MOVE,
+    export_images_and_labels, find_export_conflicts,
+)
 from io_ops.annotation_status import (
     infer_label_category_from_annotations,
     annotation_file_contains_class,
@@ -289,6 +293,134 @@ class AnnotationFileTests(unittest.TestCase):
                 label_path.read_text(encoding='utf-8'),
                 new_box.to_yolo(100, 100) + '\n',
             )
+
+
+class ImageExportTests(unittest.TestCase):
+    def test_copy_exports_image_and_existing_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'source' / 'images' / 'sample.jpg'
+            label = root / 'source' / 'labels' / 'sample.txt'
+            image.parent.mkdir(parents=True)
+            label.parent.mkdir(parents=True)
+            image.write_bytes(b'image')
+            label.write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+
+            result = export_images_and_labels(
+                [ImageItem(path=image)], root / 'output', EXPORT_MODE_COPY,
+            )[0]
+
+            self.assertTrue(result.success)
+            self.assertEqual((root / 'output/images/sample.jpg').read_bytes(), b'image')
+            self.assertEqual(
+                (root / 'output/labels/sample.txt').read_text(encoding='utf-8'),
+                '0 0.5 0.5 0.2 0.2\n',
+            )
+            self.assertTrue(image.exists())
+            self.assertTrue(label.exists())
+
+    def test_copy_without_label_still_creates_both_output_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'sample.jpg'
+            image.write_bytes(b'image')
+
+            result = export_images_and_labels(
+                [ImageItem(path=image)], root / 'output', EXPORT_MODE_COPY,
+            )[0]
+
+            self.assertTrue(result.success)
+            self.assertTrue((root / 'output/images/sample.jpg').exists())
+            self.assertTrue((root / 'output/labels').is_dir())
+            self.assertEqual(list((root / 'output/labels').iterdir()), [])
+
+    def test_same_stem_exports_receive_matching_unique_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / 'a' / 'same.jpg'
+            second = root / 'b' / 'same.png'
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b'first')
+            second.write_bytes(b'second')
+            first.with_suffix('.txt').write_text('0\n', encoding='utf-8')
+            second.with_suffix('.txt').write_text('1\n', encoding='utf-8')
+
+            results = export_images_and_labels(
+                [ImageItem(path=first), ImageItem(path=second)],
+                root / 'output', EXPORT_MODE_COPY,
+            )
+
+            self.assertEqual(results[0].image_destination.name, 'same.jpg')
+            self.assertEqual(results[0].label_destination.name, 'same.txt')
+            self.assertEqual(results[1].image_destination.name, 'same_2.png')
+            self.assertEqual(results[1].label_destination.name, 'same_2.txt')
+
+    def test_move_removes_source_image_and_label_after_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'sample.jpg'
+            label = root / 'sample.txt'
+            image.write_bytes(b'image')
+            label.write_text('0\n', encoding='utf-8')
+
+            result = export_images_and_labels(
+                [ImageItem(path=image)], root / 'output', EXPORT_MODE_MOVE,
+            )[0]
+
+            self.assertTrue(result.success)
+            self.assertTrue(result.source_removed)
+            self.assertFalse(image.exists())
+            self.assertFalse(label.exists())
+            self.assertTrue((root / 'output/images/sample.jpg').exists())
+            self.assertTrue((root / 'output/labels/sample.txt').exists())
+
+    def test_move_rolls_back_destinations_when_source_image_cannot_be_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'sample.jpg'
+            label = root / 'sample.txt'
+            image.write_bytes(b'image')
+            label.write_text('0\n', encoding='utf-8')
+            original_unlink = Path.unlink
+
+            def fail_source_image(path, *args, **kwargs):
+                if path == image:
+                    raise OSError('locked')
+                return original_unlink(path, *args, **kwargs)
+
+            with patch('io_ops.image_export.Path.unlink', new=fail_source_image):
+                result = export_images_and_labels(
+                    [ImageItem(path=image)], root / 'output', EXPORT_MODE_MOVE,
+                )[0]
+
+            self.assertFalse(result.success)
+            self.assertTrue(image.exists())
+            self.assertTrue(label.exists())
+            self.assertEqual(list((root / 'output/images').iterdir()), [])
+            self.assertEqual(list((root / 'output/labels').iterdir()), [])
+
+    def test_copy_conflict_can_be_skipped_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'sample.jpg'
+            image.write_bytes(b'new')
+            output = root / 'output'
+            (output / 'images').mkdir(parents=True)
+            (output / 'labels').mkdir()
+            (output / 'images' / 'sample.jpg').write_bytes(b'old')
+
+            conflicts = find_export_conflicts([ImageItem(path=image)], output)
+            result = export_images_and_labels(
+                [ImageItem(path=image)], output, EXPORT_MODE_COPY,
+                conflict_policy=CONFLICT_SKIP,
+            )[0]
+
+            self.assertEqual(conflicts, [ImageItem(path=image)])
+            self.assertFalse(result.success)
+            self.assertTrue(result.skipped)
+            self.assertEqual((output / 'images' / 'sample.jpg').read_bytes(), b'old')
+            self.assertFalse((output / 'images' / 'sample_2.jpg').exists())
 
 
 class ProjectScanTests(unittest.TestCase):
@@ -785,6 +917,57 @@ class LabelColorTests(unittest.TestCase):
             r, g, b = hex_to_rgb(hexc)
             luminance = 0.299 * r + 0.587 * g + 0.114 * b
             self.assertLess(luminance, 200, f'{hexc} too light/faded')
+
+
+class SessionRestoreTests(unittest.TestCase):
+    def test_restore_last_directory_starts_without_saved_filters(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / 'sample.jpg').write_bytes(b'fake')
+            config = SimpleNamespace(
+                label_sort_by_name=False,
+                label_definitions=[],
+                last_directory=str(directory),
+                last_weights_file='',
+                confidence_threshold=0.25,
+                label_mode='compact',
+                image_filter='annotated',
+                label_filter_class_id=3,
+            )
+            project = Project(
+                image_filter=ImageFilter.ANNOTATED,
+                label_filter_class_id=3,
+            )
+            filter_var = SimpleNamespace(value=None, set=lambda value: setattr(filter_var, 'value', value))
+            loaded_directories = []
+            app = SimpleNamespace(
+                _config=config,
+                _project=project,
+                _label_manager=LabelManager(),
+                _label_panel=SimpleNamespace(set_sort_by_name=lambda value: None),
+                _image_filter_var=filter_var,
+                _refresh_label_filter_options=lambda: None,
+                _sync_status_filter_combo=lambda: None,
+                _reset_image_filters=lambda: AnnotationApp._reset_image_filters(app),
+                _load_directory=lambda path: loaded_directories.append(path),
+                _pre_annotator=SimpleNamespace(model_path=''),
+                _threshold_slider=SimpleNamespace(set=lambda value: None),
+                _canvas=SimpleNamespace(set_label_mode=lambda value: None),
+                _label_mode_var=SimpleNamespace(set=lambda value: None),
+            )
+
+            with patch(
+                'ui.app.RestoreDirectoryDialog',
+                return_value=SimpleNamespace(result='restore'),
+            ):
+                AnnotationApp._restore_session(app)
+
+            self.assertEqual(loaded_directories, [str(directory)])
+            self.assertEqual(project.image_filter, ImageFilter.ALL)
+            self.assertIsNone(project.label_filter_class_id)
+            self.assertEqual(filter_var.value, ImageFilter.ALL.value)
 
 
 class ClassesFileImportTests(unittest.TestCase):

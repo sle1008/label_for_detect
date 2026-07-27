@@ -105,6 +105,173 @@ class RestoreDirectoryDialog:
         self._finish('browse')
 
 
+class ImageExportModeDialog:
+    """Choose whether selected images are copied or moved."""
+
+    WIDTH = 480
+    HEIGHT = 225
+
+    def __init__(self, parent, image_count: int):
+        self.result = None
+        self._dialog = tk.Toplevel(parent)
+        self._dialog.title('导出图片')
+        self._dialog.protocol('WM_DELETE_WINDOW', self._cancel)
+        self._mode_var = tk.StringVar(value='copy')
+
+        self._setup_ui(image_count)
+        setup_modal_dialog(self._dialog, parent, self.WIDTH, self.HEIGHT)
+        self._dialog.bind('<Return>', lambda event: self._continue())
+        self._dialog.bind('<Escape>', lambda event: self._cancel())
+        self._dialog.wait_window()
+
+    def _setup_ui(self, image_count: int):
+        body = ttk.Frame(self._dialog, padding=(18, 16, 18, 8))
+        body.pack(fill='both', expand=True)
+        ttk.Label(
+            body,
+            text=f'导出所选 {image_count} 张图片',
+            font=('Microsoft YaHei UI', 11, 'bold'),
+        ).pack(anchor='w')
+        ttk.Label(
+            body,
+            text='目标位置将自动创建 images 和 labels 目录。',
+        ).pack(anchor='w', pady=(5, 10))
+        ttk.Radiobutton(
+            body,
+            text='复制（保留当前目录中的原文件，推荐）',
+            variable=self._mode_var,
+            value='copy',
+        ).pack(anchor='w', pady=2)
+        ttk.Radiobutton(
+            body,
+            text='移动（导出成功后从当前目录移除原文件）',
+            variable=self._mode_var,
+            value='move',
+        ).pack(anchor='w', pady=2)
+
+        buttons = ttk.Frame(self._dialog, padding=(18, 8, 18, 14))
+        buttons.pack(side='bottom', fill='x')
+        ttk.Button(
+            buttons,
+            text='下一步：选择目录...',
+            command=self._continue,
+            width=20,
+        ).pack(side='right', padx=(8, 0))
+        ttk.Button(
+            buttons, text='取消', command=self._cancel, width=10,
+        ).pack(side='right')
+
+    def _continue(self):
+        self.result = self._mode_var.get()
+        self._dialog.destroy()
+
+    def _cancel(self):
+        self._dialog.destroy()
+
+
+class ImageExportConflictDialog:
+    """Choose how copy-mode name conflicts should be handled."""
+
+    WIDTH = 500
+    HEIGHT = 245
+
+    def __init__(self, parent, conflict_count: int):
+        self.result = None
+        self._dialog = tk.Toplevel(parent)
+        self._dialog.title('发现同名图片')
+        self._dialog.protocol('WM_DELETE_WINDOW', self._cancel)
+        self._setup_ui(conflict_count)
+        setup_modal_dialog(self._dialog, parent, self.WIDTH, self.HEIGHT)
+        self._dialog.bind('<Escape>', lambda event: self._cancel())
+        self._dialog.wait_window()
+
+    def _setup_ui(self, conflict_count: int):
+        body = ttk.Frame(self._dialog, padding=(18, 16, 18, 8))
+        body.pack(fill='both', expand=True)
+        ttk.Label(
+            body,
+            text=f'发现 {conflict_count} 张图片与目标位置同名。',
+            font=('Microsoft YaHei UI', 11, 'bold'),
+        ).pack(anchor='w')
+        ttk.Label(
+            body,
+            text='请选择复制模式下的处理方式：',
+        ).pack(anchor='w', pady=(6, 10))
+        ttk.Label(
+            body,
+            text='使用后缀：保留全部文件，并为冲突文件自动添加 _2、_3 等后缀。\n'
+                 '跳过同名：不覆盖目标文件，冲突图片不导出。',
+            justify='left',
+        ).pack(anchor='w')
+
+        buttons = ttk.Frame(self._dialog, padding=(18, 8, 18, 14))
+        buttons.pack(side='bottom', fill='x')
+        ttk.Button(
+            buttons,
+            text='使用后缀保存',
+            command=lambda: self._finish('suffix'),
+            width=16,
+        ).pack(side='right', padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text='跳过同名文件',
+            command=lambda: self._finish('skip'),
+            width=16,
+        ).pack(side='right', padx=(8, 0))
+        ttk.Button(
+            buttons, text='取消导出', command=self._cancel, width=12,
+        ).pack(side='right')
+
+    def _finish(self, result: str):
+        self.result = result
+        self._dialog.destroy()
+
+    def _cancel(self):
+        self._dialog.destroy()
+
+
+class ImageExportProgressDialog:
+    """Modal progress display used while files are exported in a worker."""
+
+    WIDTH = 480
+    HEIGHT = 155
+
+    def __init__(self, parent, total: int, mode: str):
+        self._dialog = tk.Toplevel(parent)
+        self._dialog.title('正在导出图片')
+        self._dialog.protocol('WM_DELETE_WINDOW', lambda: None)
+        self._status_var = tk.StringVar(value='正在准备...')
+
+        body = ttk.Frame(self._dialog, padding=(18, 16))
+        body.pack(fill='both', expand=True)
+        action = '移动' if mode == 'move' else '复制'
+        ttk.Label(
+            body,
+            text=f'正在{action} {total} 张图片及其标签文件',
+            font=('Microsoft YaHei UI', 10, 'bold'),
+        ).pack(anchor='w')
+        self._progress = ttk.Progressbar(
+            body, mode='determinate', maximum=max(1, total), value=0,
+        )
+        self._progress.pack(fill='x', pady=(12, 8))
+        ttk.Label(body, textvariable=self._status_var).pack(anchor='w')
+
+        setup_modal_dialog(self._dialog, parent, self.WIDTH, self.HEIGHT)
+
+    def update_progress(self, completed: int, total: int, name: str):
+        if not self._dialog.winfo_exists():
+            return
+        self._progress.configure(maximum=max(1, total), value=completed)
+        self._status_var.set(f'{completed}/{total}  {name}')
+
+    def wait(self):
+        self._dialog.wait_window()
+
+    def close(self):
+        if self._dialog.winfo_exists():
+            self._dialog.destroy()
+
+
 class ExportDialog:
     """Export settings dialog."""
     
