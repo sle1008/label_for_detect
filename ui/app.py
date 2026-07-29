@@ -2810,7 +2810,7 @@ class AnnotationApp(tk.Tk):
             return
         
         if not self._pre_annotator.is_loaded:
-            showinfo(self, '提示', '请先加载YOLOv8权重文件')
+            showinfo(self, '提示', '请先加载权重文件')
             self._load_weights()
             return
         
@@ -2884,7 +2884,7 @@ class AnnotationApp(tk.Tk):
             return
         
         if not self._pre_annotator.is_loaded:
-            showinfo(self, '提示', '请先加载YOLOv8权重文件')
+            showinfo(self, '提示', '请先加载权重文件')
             self._load_weights()
             return
         
@@ -3069,7 +3069,7 @@ Escape      取消绘制 / 取消选中
         showinfo(self, '快捷键说明', shortcuts)
     
     def _show_about(self):
-        showinfo(self, '关于', '目标检测标注工具 v1.0\n\n支持格式: YOLO, COCO, Pascal VOC\n预标注: YOLOv8 (ultralytics)')
+        showinfo(self, '关于', '目标检测标注工具 v1.0\n\n支持格式: YOLO, COCO, Pascal VOC\n预标注: YOLO (ultralytics)')
     
     # --- Cleanup ---
     

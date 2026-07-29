@@ -1,4 +1,4 @@
-"""YOLOv8 pre-annotation engine."""
+"""YOLO pre-annotation engine."""
 
 import threading
 import time
@@ -14,7 +14,7 @@ SUPPORTED_WEIGHT_EXTENSIONS: Set[str] = {'.pt', '.onnx', '.engine', '.trt'}
 
 
 class PreAnnotator:
-    """Uses YOLOv8 for pre-annotation."""
+    """Uses YOLO for pre-annotation."""
     
     def __init__(self):
         self._model = None
