@@ -2822,7 +2822,10 @@ class AnnotationApp(tk.Tk):
         
         def on_done(annotations, elapsed):
             if self._project.current_image is not item:
-                self._status_bar.info('预标注完成（当前已切换图片，结果未应用）')
+                self._status_bar.info(
+                    f'预标注完成（当前已切换图片，结果未应用），权重: '
+                    f'{Path(self._pre_annotator.model_path).name}'
+                )
                 return
             
             count = len(annotations)
@@ -2853,7 +2856,8 @@ class AnnotationApp(tk.Tk):
                 return
 
             self._status_bar.success(
-                f'预标注完成并已覆盖保存: {count} 个目标, 耗时 {time_text}'
+                f'预标注完成并已覆盖保存: {count} 个目标, 耗时 {time_text}，'
+                f'权重: {Path(self._pre_annotator.model_path).name}'
             )
         
         self._pre_annotator.predict_async(
@@ -2939,7 +2943,8 @@ class AnnotationApp(tk.Tk):
                 self._status_bar.success(
                     f'{prefix}: 共 {total_anns} 个标注, '
                     f'处理 {processed}/{total} 张, '
-                    f'总耗时 {time_total}, 平均 {time_avg}/张'
+                    f'总耗时 {time_total}, 平均 {time_avg}/张，'
+                    f'权重: {Path(self._pre_annotator.model_path).name}'
                 )
             else:
                 self._status_bar.warning('批量预标注已取消或未处理任何图片')
