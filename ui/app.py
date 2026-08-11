@@ -97,9 +97,12 @@ class AnnotationApp(tk.Tk):
         self._pre_annotator = PreAnnotator()
         self._threshold = DEFAULT_CONFIDENCE_THRESHOLD
         self._scan_generation = 0
+        self._directory_loading = False
         self._restore_dir_path = ''
         self._restore_image_path = ''
         self._restore_image_index = 0
+        self._pending_weights_path = ''
+        self._weights_load_in_progress = False
         self._main_thread_queue = queue.Queue()
         self._filter_status_snapshot = {}
         self._pending_refresh = None
@@ -1166,15 +1169,86 @@ class AnnotationApp(tk.Tk):
                 self._reset_image_filters()
                 self._load_directory(last_directory)
         
-        # Restore weights
+        # Restore weights only after the directory/list/first preview is ready.
         if self._config.last_weights_file and Path(self._config.last_weights_file).is_file():
-            self._pre_annotator.load_weights(self._config.last_weights_file)
+            if (
+                not self._pending_weights_path
+                and not self._weights_load_in_progress
+                and not self._pre_annotator.is_loaded
+            ):
+                self._defer_weights_load_until_images_ready(self._config.last_weights_file)
         
         self._threshold = self._config.confidence_threshold
         self._threshold_slider.set(self._threshold)
         if self._config.label_mode in LABEL_MODE_CYCLE:
             self._canvas.set_label_mode(self._config.label_mode)
             self._label_mode_var.set(self._config.label_mode)
+
+    def _defer_weights_load_until_images_ready(self, path: str):
+        """Queue an initial model load until directory loading has completed."""
+        if not path:
+            return
+        self._pending_weights_path = path
+        if not self._directory_loading:
+            self.after_idle(self._start_pending_weights_load)
+
+    def _start_pending_weights_load(self):
+        """Start a queued initial model load without blocking the Tk thread."""
+        if self._directory_loading or self._weights_load_in_progress:
+            return
+        path = self._pending_weights_path
+        if not path:
+            return
+        self._pending_weights_path = ''
+        self._load_weights_async(path, show_error=False)
+
+    def _load_weights_async(self, path: str, show_error: bool = True) -> bool:
+        """Load pre-annotation weights on a daemon thread."""
+        if self._weights_load_in_progress:
+            self._status_bar.warning('预标注权重正在加载，请稍候...')
+            return False
+        if self._pre_annotator.is_busy:
+            self._status_bar.warning('预标注进行中，暂时无法更换权重')
+            return False
+
+        import threading
+
+        self._weights_load_in_progress = True
+        model_name = Path(path).name
+        self._status_bar.set_info(f'正在后台加载模型: {model_name}')
+
+        def worker():
+            try:
+                success = self._pre_annotator.load_weights(path)
+            except Exception as exc:
+                print(f'Failed to load model ({path}): {exc}')
+                success = False
+            self._call_in_main(
+                lambda: self._finish_weights_load(path, success, show_error)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def _finish_weights_load(self, path: str, success: bool, show_error: bool):
+        """Finish an asynchronous model load on the Tk main thread."""
+        self._weights_load_in_progress = False
+        if success:
+            self._config.last_weights_file = path
+            self._status_bar.set_info(f'模型加载成功: {Path(path).name}')
+            return
+
+        if show_error:
+            showerror(
+                self,
+                '错误',
+                '模型加载失败。\n'
+                '支持格式: .pt / .onnx / .engine / .trt\n\n'
+                '· .onnx 需: pip install onnxruntime\n'
+                '· .engine/.trt 需: NVIDIA GPU + CUDA + tensorrt\n'
+                '  本机若无 NVIDIA 显卡，请改用 .pt 或 .onnx',
+            )
+        self._status_bar.set_info('模型加载失败')
     
     def _apply_saved_image_filters(self):
         """Restore persisted status and label filters for session recovery."""
@@ -1374,8 +1448,10 @@ class AnnotationApp(tk.Tk):
                     progress = int(idx * 100 / total)
                     if progress != self._label_cache_progress:
                         self._label_cache_progress = progress
-                        self.after(0, lambda p=progress: self._status_bar.set_overlay(f'标签缓存中... {p}%'))
-            self.after(0, lambda gen=gen: self._finish_label_cache_preload(gen))
+                        self._call_in_main(
+                            lambda p=progress: self._status_bar.set_overlay(f'标签缓存中... {p}%')
+                        )
+            self._call_in_main(lambda gen=gen: self._finish_label_cache_preload(gen))
         threading.Thread(target=bg, daemon=True).start()
 
     def _finish_label_cache_preload(self, gen: int):
@@ -1480,6 +1556,7 @@ class AnnotationApp(tk.Tk):
         
         self._scan_generation += 1
         scan_gen = self._scan_generation
+        self._directory_loading = True
         
         self._project.image_dir = Path(dir_path)
         self._project.image_list.clear()
@@ -1556,13 +1633,16 @@ class AnnotationApp(tk.Tk):
     def _on_scan_failed(self, error: Exception, scan_gen: int):
         if scan_gen != self._scan_generation:
             return
+        self._directory_loading = False
         self._status_bar.error(f'加载目录失败: {error}')
         showerror(self, '错误', f'加载目录失败:\n{error}')
+        self.after_idle(self._start_pending_weights_load)
     
     def _on_scan_complete(self, dir_path: str, paths: list, scan_gen: int,
                           preloaded: ImageItem = None):
         if scan_gen != self._scan_generation:
             return
+        self._directory_loading = False
         
         count = self._project.set_image_paths(dir_path, paths)
         self._apply_manual_statuses(dir_path)
@@ -1610,6 +1690,10 @@ class AnnotationApp(tk.Tk):
         else:
             self._status_bar.warning(f'目录中未找到图片: {dir_path}')
             showwarning(self, '提示', '目录中未找到支持的图片文件')
+
+        # Let Tk paint the completed image list/preview before model loading
+        # begins on its background thread.
+        self.after_idle(self._start_pending_weights_load)
     
     def _resolve_last_image_index(self, dir_path: str) -> int:
         """Find saved image index when reopening the same directory."""
@@ -1847,6 +1931,13 @@ class AnnotationApp(tk.Tk):
     
     def _load_weights(self):
         """Load YOLO model for pre-annotation."""
+        if self._weights_load_in_progress:
+            self._status_bar.warning('预标注权重正在加载，请稍候...')
+            return
+        if self._pre_annotator.is_busy:
+            self._status_bar.warning('预标注进行中，暂时无法更换权重')
+            return
+
         filetypes = [
             ('模型文件', '*.pt *.onnx *.engine *.trt'),
             ('PyTorch', '*.pt'),
@@ -1859,24 +1950,10 @@ class AnnotationApp(tk.Tk):
         )
         if not path:
             return
-        
-        self._status_bar.set_info('正在加载模型...')
-        self.update_idletasks()
-        
-        if self._pre_annotator.load_weights(path):
-            self._config.last_weights_file = path
-            self._status_bar.set_info(f'模型加载成功: {Path(path).name}')
-        else:
-            showerror(
-                self,
-                '错误',
-                '模型加载失败。\n'
-                '支持格式: .pt / .onnx / .engine / .trt\n\n'
-                '· .onnx 需: pip install onnxruntime\n'
-                '· .engine/.trt 需: NVIDIA GPU + CUDA + tensorrt\n'
-                '  本机若无 NVIDIA 显卡，请改用 .pt 或 .onnx',
-            )
-            self._status_bar.set_info('模型加载失败')
+
+        # An explicit manual choice supersedes any queued session restore.
+        self._pending_weights_path = ''
+        self._load_weights_async(path, show_error=True)
     
     # --- Navigation ---
 
@@ -2805,6 +2882,9 @@ class AnnotationApp(tk.Tk):
     
     def _pre_annotate_current(self):
         """Run pre-annotation on current image (background thread)."""
+        if self._weights_load_in_progress:
+            self._status_bar.warning('预标注权重正在加载，请稍候...')
+            return
         if self._pre_annotator.is_busy:
             self._status_bar.warning('预标注进行中，请稍候...')
             return
@@ -2883,6 +2963,9 @@ class AnnotationApp(tk.Tk):
     
     def _batch_pre_annotate(self):
         """Run batch pre-annotation on images in the current filter (background thread)."""
+        if self._weights_load_in_progress:
+            self._status_bar.warning('预标注权重正在加载，请稍候...')
+            return
         if self._pre_annotator.is_busy:
             self._status_bar.warning('预标注进行中，请稍候...')
             return

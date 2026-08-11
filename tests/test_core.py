@@ -969,6 +969,75 @@ class SessionRestoreTests(unittest.TestCase):
             self.assertIsNone(project.label_filter_class_id)
             self.assertEqual(filter_var.value, ImageFilter.ALL.value)
 
+    def test_initial_weights_wait_for_directory_completion(self):
+        from ui.app import AnnotationApp
+
+        scheduled = []
+        started = []
+        app = SimpleNamespace(
+            _directory_loading=True,
+            _pending_weights_path='',
+            _weights_load_in_progress=False,
+            after_idle=lambda callback: scheduled.append(callback),
+            _load_weights_async=lambda path, show_error=False: started.append(
+                (path, show_error)
+            ),
+        )
+
+        AnnotationApp._defer_weights_load_until_images_ready(app, 'model.pt')
+        self.assertEqual(app._pending_weights_path, 'model.pt')
+        self.assertEqual(scheduled, [])
+        self.assertEqual(started, [])
+
+        app._directory_loading = False
+        AnnotationApp._start_pending_weights_load(app)
+        self.assertEqual(started, [('model.pt', False)])
+        self.assertEqual(app._pending_weights_path, '')
+
+    def test_async_weight_load_starts_worker_without_running_inline(self):
+        from ui.app import AnnotationApp
+
+        status_messages = []
+        load_calls = []
+        app = SimpleNamespace(
+            _weights_load_in_progress=False,
+            _pre_annotator=SimpleNamespace(
+                is_busy=False,
+                load_weights=lambda path: load_calls.append(path) or True,
+            ),
+            _status_bar=SimpleNamespace(
+                warning=lambda message: status_messages.append(message),
+                set_info=lambda message: status_messages.append(message),
+            ),
+            _call_in_main=lambda callback: None,
+            _finish_weights_load=lambda path, success, show_error: None,
+        )
+
+        with patch('threading.Thread') as thread_cls:
+            result = AnnotationApp._load_weights_async(app, 'model.pt')
+
+        self.assertTrue(result)
+        self.assertTrue(app._weights_load_in_progress)
+        self.assertEqual(load_calls, [])
+        thread_cls.assert_called_once()
+        thread_cls.return_value.start.assert_called_once_with()
+        self.assertTrue(thread_cls.call_args.kwargs['daemon'])
+        self.assertIn('model.pt', status_messages[-1])
+
+
+class StatusBarTests(unittest.TestCase):
+    def test_overlay_updates_current_message_without_logging(self):
+        from ui.status_bar import StatusBar
+
+        displayed = []
+        status_bar = SimpleNamespace(
+            _current_msg=SimpleNamespace(set=lambda text: displayed.append(text)),
+        )
+
+        StatusBar.set_overlay(status_bar, '标签缓存中... 50%')
+
+        self.assertEqual(displayed, ['标签缓存中... 50%'])
+
 
 class ClassesFileImportTests(unittest.TestCase):
     def test_load_from_txt_id_name_format(self):

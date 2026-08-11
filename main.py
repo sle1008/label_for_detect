@@ -124,7 +124,7 @@ def main():
                 app._label_manager.load_from_yaml(args.labels)
             app._label_panel.refresh()
         if args.weights:
-            app._pre_annotator.load_weights(args.weights)
+            app._defer_weights_load_until_images_ready(args.weights)
 
         app.mainloop()
     finally:
