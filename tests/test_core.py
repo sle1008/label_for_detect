@@ -436,6 +436,24 @@ class ProjectScanTests(unittest.TestCase):
             paths = Project.scan_image_paths(str(root))
             self.assertEqual(len(paths), 3)
 
+    def test_scan_sorts_by_filename_across_subdirectories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_folder = root / 'a_folder'
+            second_folder = root / 'z_folder'
+            first_folder.mkdir()
+            second_folder.mkdir()
+            (first_folder / 'device_b.jpg').write_bytes(b'1')
+            (second_folder / 'device_a.jpg').write_bytes(b'2')
+            (first_folder / 'device_c.jpg').write_bytes(b'3')
+
+            paths = Project.scan_image_paths(str(root))
+
+            self.assertEqual(
+                [path.name for path in paths],
+                ['device_a.jpg', 'device_b.jpg', 'device_c.jpg'],
+            )
+
 
 from io_ops.folder_labels import detect_class_folder_layout
 
@@ -502,6 +520,38 @@ class ProjectFilterTests(unittest.TestCase):
             indices = project.get_filtered_indices()
             self.assertEqual(indices, [0])
             self.assertEqual(project.image_list[indices[0]].name, 'a.jpg')
+
+    def test_label_filter_keeps_only_matches_in_filename_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_folder = root / 'a_folder'
+            second_folder = root / 'z_folder'
+            first_folder.mkdir()
+            second_folder.mkdir()
+
+            (first_folder / 'device_c.jpg').write_bytes(b'x')
+            (first_folder / 'device_c.txt').write_text(
+                '1 0.5 0.5 0.2 0.2\n', encoding='utf-8',
+            )
+            (second_folder / 'device_a.jpg').write_bytes(b'x')
+            (second_folder / 'device_a.txt').write_text(
+                '1 0.5 0.5 0.2 0.2\n', encoding='utf-8',
+            )
+            (first_folder / 'device_b.jpg').write_bytes(b'x')
+            (first_folder / 'device_b.txt').write_text(
+                '2 0.5 0.5 0.2 0.2\n', encoding='utf-8',
+            )
+
+            project = Project()
+            project.set_image_paths(str(root), Project.scan_image_paths(str(root)))
+            project.label_filter_class_id = 1  # pig
+
+            indices = project.get_filtered_indices()
+
+            self.assertEqual(
+                [project.image_list[index].name for index in indices],
+                ['device_a.jpg', 'device_c.jpg'],
+            )
 
     def test_navigation_respects_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1037,6 +1087,34 @@ class StatusBarTests(unittest.TestCase):
         StatusBar.set_overlay(status_bar, '标签缓存中... 50%')
 
         self.assertEqual(displayed, ['标签缓存中... 50%'])
+
+
+class ImageExportModeDialogTests(unittest.TestCase):
+    def test_uses_last_move_mode_as_default(self):
+        from ui.dialogs import ImageExportModeDialog
+
+        dialog = ImageExportModeDialog.__new__(ImageExportModeDialog)
+        dialog.result = None
+        with patch('ui.dialogs.tk.Toplevel'), \
+                patch('ui.dialogs.tk.StringVar') as string_var, \
+                patch.object(ImageExportModeDialog, '_setup_ui'), \
+                patch('ui.dialogs.setup_modal_dialog'):
+            dialog.__init__(SimpleNamespace(), 3, default_mode='move')
+
+        string_var.assert_called_once_with(value='move')
+
+    def test_invalid_default_mode_falls_back_to_copy(self):
+        from ui.dialogs import ImageExportModeDialog
+
+        dialog = ImageExportModeDialog.__new__(ImageExportModeDialog)
+        dialog.result = None
+        with patch('ui.dialogs.tk.Toplevel'), \
+                patch('ui.dialogs.tk.StringVar') as string_var, \
+                patch.object(ImageExportModeDialog, '_setup_ui'), \
+                patch('ui.dialogs.setup_modal_dialog'):
+            dialog.__init__(SimpleNamespace(), 1, default_mode='invalid')
+
+        string_var.assert_called_once_with(value='copy')
 
 
 class ClassesFileImportTests(unittest.TestCase):

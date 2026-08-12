@@ -111,12 +111,14 @@ class ImageExportModeDialog:
     WIDTH = 480
     HEIGHT = 225
 
-    def __init__(self, parent, image_count: int):
+    def __init__(self, parent, image_count: int, default_mode: str = 'copy'):
         self.result = None
         self._dialog = tk.Toplevel(parent)
         self._dialog.title('导出图片')
         self._dialog.protocol('WM_DELETE_WINDOW', self._cancel)
-        self._mode_var = tk.StringVar(value='copy')
+        if default_mode not in ('copy', 'move'):
+            default_mode = 'copy'
+        self._mode_var = tk.StringVar(value=default_mode)
 
         self._setup_ui(image_count)
         setup_modal_dialog(self._dialog, parent, self.WIDTH, self.HEIGHT)

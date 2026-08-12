@@ -669,10 +669,16 @@ class AnnotationApp(tk.Tk):
         if not items:
             return
 
-        mode_dialog = ImageExportModeDialog(self, len(items))
+        mode_dialog = ImageExportModeDialog(
+            self,
+            len(items),
+            default_mode=self._config.last_image_export_mode,
+        )
         mode = mode_dialog.result
         if not mode:
             return
+        self._config.last_image_export_mode = mode
+        self._config_manager.save(self._config)
         initial = self._config.last_directory or os.path.expanduser('~')
         output_dir = filedialog.askdirectory(
             parent=self,

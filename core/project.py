@@ -81,7 +81,10 @@ class Project:
         except OSError:
             pass
         
-        return sorted(set(files))
+        return sorted(
+            set(files),
+            key=lambda path: (path.name.casefold(), str(path).casefold(), str(path)),
+        )
     
     def load_directory(self, dir_path: str) -> int:
         """Load images from a directory (path scan only, no decode)."""
