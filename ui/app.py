@@ -775,7 +775,11 @@ class AnnotationApp(tk.Tk):
             self._save_manual_statuses()
 
         action = '移动' if mode == EXPORT_MODE_MOVE else '复制'
-        summary = f'已{action} {len(succeeded)} 张图片到：\n{output_dir}'
+        destination_image_count = len(Project.scan_image_paths(str(output_dir)))
+        summary = (
+            f'已{action} {len(succeeded)} 张图片到：\n{output_dir}'
+            f'\n\n此目录内现有{destination_image_count}张图片。'
+        )
         details = []
         if failed:
             details.append(f'{len(failed)} 张失败')
