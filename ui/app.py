@@ -172,7 +172,7 @@ class AnnotationApp(tk.Tk):
         # Toolbar
         self._toolbar = Toolbar(
             self, callbacks={
-                'refresh_dir': self._refresh_directory,
+                'refresh_list': self._refresh_list,
                 'save': self._save_current,
                 'load_labels': self._load_label_file,
                 'prev_image': self._prev_image,
@@ -433,7 +433,7 @@ class AnnotationApp(tk.Tk):
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label='打开目录...', command=self._open_directory, accelerator='Ctrl+O')
-        file_menu.add_command(label='刷新目录', command=self._refresh_directory)
+        file_menu.add_command(label='刷新列表', command=self._refresh_list)
         file_menu.add_command(label='加载标签...', command=self._load_label_file)
         file_menu.add_command(label='加载预标注权重...', command=self._load_weights)
         file_menu.add_separator()
@@ -679,7 +679,7 @@ class AnnotationApp(tk.Tk):
             return
         self._config.last_image_export_mode = mode
         self._config_manager.save(self._config)
-        initial = self._config.last_directory or os.path.expanduser('~')
+        initial = self._initial_image_export_directory()
         output_dir = filedialog.askdirectory(
             parent=self,
             initialdir=initial,
@@ -687,6 +687,8 @@ class AnnotationApp(tk.Tk):
         )
         if not output_dir:
             return
+        self._config.last_image_export_directory = output_dir
+        self._config_manager.save(self._config)
         conflict_policy = CONFLICT_SUFFIX
         if mode == EXPORT_MODE_COPY:
             conflicts = find_export_conflicts(items, Path(output_dir))
@@ -737,6 +739,17 @@ class AnnotationApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
         progress_dialog.wait()
+
+    def _initial_image_export_directory(self) -> str:
+        """Return the last valid image-export destination, with safe fallbacks."""
+        candidates = (
+            self._config.last_image_export_directory,
+            self._config.last_directory,
+        )
+        for candidate in candidates:
+            if candidate and Path(candidate).is_dir():
+                return candidate
+        return os.path.expanduser('~')
 
     def _finish_image_export(
         self, results, mode, output_dir, visible_items, current_item,
@@ -929,6 +942,14 @@ class AnnotationApp(tk.Tk):
         self._filter_status_snapshot.pop(id(item), None)
 
         self._project.remove_image_at(full_index)
+        pending_indices = [
+            index - 1 if index > full_index else index
+            for index in self._thumb_panel.full_indices()
+            if index != full_index
+        ]
+        self._project.set_visible_indices(pending_indices)
+        if was_current:
+            self._thumb_panel.set_interaction_enabled(False)
 
         if was_current:
             if adjacent_item is None:
@@ -942,9 +963,8 @@ class AnnotationApp(tk.Tk):
                     -1,
                 )
                 self._project.current_index = adjacent_index
-        self._refresh_image_list_view(jump='keep', navigate=False)
-
         if not self._project.image_list:
+            self._finish_single_image_list_removal(full_index)
             self._canvas.clear_all()
             self._box_list_panel.set_image(None)
             self._update_window_title()
@@ -953,18 +973,35 @@ class AnnotationApp(tk.Tk):
 
         if was_current:
             if self._project.current_image is None:
+                self._finish_single_image_list_removal(full_index)
                 self._canvas.clear_all()
                 self._box_list_panel.set_image(None)
                 self._update_window_title()
             else:
-                self._show_current_image_async(clear_canvas=False)
+                self._show_current_image_async(
+                    clear_canvas=False,
+                    on_displayed=lambda index=full_index: self.after(
+                        50, self._finish_single_image_list_removal, index,
+                    ),
+                )
         else:
+            self._finish_single_image_list_removal(full_index)
             self._thumb_panel.set_current_by_full_index(self._project.current_index)
 
         if err:
             self._status_bar.warning(f'已删除图片，但部分标注文件未删除: {err}')
         else:
             self._status_bar.success(f'已删除: {display_name}')
+
+    def _finish_single_image_list_removal(self, full_index: int):
+        """Update the left list after the replacement image has been painted."""
+        try:
+            self._thumb_panel.remove_full_index(full_index)
+            self._project.set_visible_indices(self._thumb_panel.full_indices())
+            if self._project.current_image is not None:
+                self._thumb_panel.set_current_by_full_index(self._project.current_index)
+        finally:
+            self._thumb_panel.set_interaction_enabled(True)
 
     def _set_images_category(self, indices, category: str):
         indices = sorted(set(indices))
@@ -1064,7 +1101,7 @@ class AnnotationApp(tk.Tk):
     
     def _setup_bindings(self):
         """Setup keyboard shortcuts."""
-        self.bind('<Control-o>', lambda e: self._refresh_directory())
+        self.bind('<Control-o>', lambda e: self._refresh_list())
         self.bind('<Control-s>', lambda e: self._save_current())
         self.bind('<Control-S>', lambda e: self._export())  # Ctrl+Shift+S
         self.bind('<Control-z>', lambda e: self._undo())
@@ -1382,9 +1419,13 @@ class AnnotationApp(tk.Tk):
         ):
             return
         try:
+            txt_path = resolve_annotation_txt_path(item.path)
+            item._annotation_path_checked = True
+            item._annotation_file_path = txt_path
             file_anns = load_annotation_file(
                 item.path, self._label_manager,
                 img_width=item.width, img_height=item.height,
+                txt_path=txt_path, annotation_path_resolved=True,
             )
             # Disk IO can overlap a main-thread edit. Once the in-memory item
             # becomes dirty, the just-read disk snapshot is stale and must not
@@ -1399,17 +1440,32 @@ class AnnotationApp(tk.Tk):
             item._annotations_loaded = True
     
     def _preload_window_async(self, center_index: int = None):
-        """Preload nearby image pixels without mutating annotation state."""
+        """Preload nearby visible image pixels without mutating annotation state."""
         if not self._project.image_list:
             return
         if center_index is None:
             center_index = self._project.current_index
-        
+
+        image_list, center_index = self._visible_preload_window(center_index)
+        if center_index is None:
+            return
         self._image_loader.preload_neighbors(
-            center_index, self._project.image_list,
+            center_index, image_list,
             forward=PRELOAD_FORWARD, backward=PRELOAD_BACKWARD,
         )
         self._start_label_cache_preload()
+
+    def _visible_preload_window(self, full_index: int):
+        """Return the displayed image sequence and current position within it."""
+        visible_indices = self._project.get_visible_indices()
+        try:
+            center_index = visible_indices.index(full_index)
+        except ValueError:
+            return [], None
+        return (
+            [self._project.image_list[index] for index in visible_indices],
+            center_index,
+        )
     
     def _start_label_cache_preload(self):
         if not self._project.image_list:
@@ -1514,8 +1570,8 @@ class AnnotationApp(tk.Tk):
             self._reset_image_filters()
             self._load_directory(d)
 
-    def _refresh_directory(self):
-        """Rescan the open directory, clear decode cache, and keep the current image."""
+    def _refresh_list(self):
+        """Rescan disk and rebuild the list using the active filters."""
         if not self._project.image_dir:
             showwarning(self, '提示', '请先打开一个目录')
             return
@@ -1533,12 +1589,16 @@ class AnnotationApp(tk.Tk):
         }
         self._load_directory(str(dir_path), from_refresh=True)
 
+    # Backward-compatible name for integrations that still call the old action.
+    def _refresh_directory(self):
+        return self._refresh_list()
+
     def _load_directory(self, dir_path: str, from_refresh: bool = False):
         """Load images from directory without blocking the UI."""
         import threading
         
         self._status_bar.info(
-            f'正在刷新目录: {dir_path}' if from_refresh else f'正在扫描目录: {dir_path}'
+            f'正在刷新列表: {dir_path}' if from_refresh else f'正在扫描目录: {dir_path}'
         )
         self.update_idletasks()
         
@@ -1565,6 +1625,8 @@ class AnnotationApp(tk.Tk):
         self._directory_loading = True
         
         self._project.image_dir = Path(dir_path)
+        refresh_image_filter = self._project.image_filter
+        refresh_label_filter_class_id = self._project.label_filter_class_id
         self._project.image_list.clear()
         self._project.current_index = -1
         self._thumb_panel.clear()
@@ -1578,17 +1640,38 @@ class AnnotationApp(tk.Tk):
                 self._call_in_main(lambda err=e: self._on_scan_failed(err, scan_gen))
                 return
             
+            refreshed_indices = None
             preloaded = None
             preload_path = None
             if pending_refresh:
-                target_idx = Project.resolve_refresh_index(
-                    paths,
-                    pending_refresh['prior_paths'],
-                    pending_refresh['current_path'],
-                    pending_refresh['current_index'],
+                refreshed_project = Project(
+                    image_filter=refresh_image_filter,
+                    label_filter_class_id=refresh_label_filter_class_id,
                 )
-                if 0 <= target_idx < len(paths):
-                    preload_path = paths[target_idx]
+                refreshed_project.set_image_paths(dir_path, paths)
+                statuses = load_manual_statuses(Path(dir_path))
+                if statuses:
+                    image_dir = Path(dir_path)
+                    for item in refreshed_project.image_list:
+                        try:
+                            relative = item.path.relative_to(image_dir).as_posix()
+                        except ValueError:
+                            relative = item.path.name
+                        if statuses.get(relative) == IMAGE_CATEGORY_UNCERTAIN:
+                            item.manual_annotation_status = IMAGE_CATEGORY_UNCERTAIN
+                refreshed_indices = refreshed_project.get_filtered_indices()
+                current_path = pending_refresh['current_path']
+                if current_path is not None:
+                    preload_path = next(
+                        (
+                            paths[index] for index in refreshed_indices
+                            if paths[index] == current_path
+                            or str(paths[index]) == str(current_path)
+                        ),
+                        None,
+                    )
+                if preload_path is None and refreshed_indices:
+                    preload_path = paths[refreshed_indices[0]]
             else:
                 preload_path = self._resolve_preload_path(dir_path, paths)
 
@@ -1599,7 +1682,7 @@ class AnnotationApp(tk.Tk):
             
             self._call_in_main(
                 lambda item=preloaded: self._on_scan_complete(
-                    dir_path, paths, scan_gen, item,
+                    dir_path, paths, scan_gen, item, refreshed_indices,
                 )
             )
         
@@ -1634,6 +1717,8 @@ class AnnotationApp(tk.Tk):
                 item.height = preloaded.height
                 item.annotations = preloaded.annotations
                 item._annotations_loaded = preloaded._annotations_loaded
+                item._annotation_path_checked = preloaded._annotation_path_checked
+                item._annotation_file_path = preloaded._annotation_file_path
                 return
     
     def _on_scan_failed(self, error: Exception, scan_gen: int):
@@ -1645,7 +1730,8 @@ class AnnotationApp(tk.Tk):
         self.after_idle(self._start_pending_weights_load)
     
     def _on_scan_complete(self, dir_path: str, paths: list, scan_gen: int,
-                          preloaded: ImageItem = None):
+                          preloaded: ImageItem = None,
+                          refreshed_indices: list = None):
         if scan_gen != self._scan_generation:
             return
         self._directory_loading = False
@@ -1663,20 +1749,55 @@ class AnnotationApp(tk.Tk):
             if preloaded and preloaded.is_loaded:
                 self._merge_preloaded_item(preloaded)
             
-            self._thumb_panel.set_images(self._project.image_list)
             self._config.last_directory = dir_path
             if not pending_refresh:
                 self._config.add_recent_dir(dir_path)
             
             if pending_refresh:
-                restore_idx = Project.resolve_refresh_index(
-                    paths,
-                    pending_refresh['prior_paths'],
-                    pending_refresh['current_path'],
-                    pending_refresh['current_index'],
+                indices = list(refreshed_indices or [])
+                current_path = pending_refresh['current_path']
+                restore_idx = next(
+                    (
+                        index for index in indices
+                        if current_path is not None
+                        and (
+                            paths[index] == current_path
+                            or str(paths[index]) == str(current_path)
+                        )
+                    ),
+                    indices[0] if indices else -1,
                 )
-                msg_prefix = '刷新完成'
+                items = [self._project.image_list[index] for index in indices]
+                self._thumb_panel.set_images(
+                    items,
+                    full_indices=indices,
+                    filter_hint=self._filter_hint_text(),
+                )
+                self._project.set_visible_indices(indices)
+                if restore_idx >= 0:
+                    self._project.goto_image(restore_idx)
+                    self._thumb_panel.set_current_by_full_index(restore_idx)
+                    self._status_bar.info(
+                        f'列表刷新完成: {len(indices)}/{count} 张图片，正在加载当前列表图片...'
+                    )
+                    self._show_current_image_async()
+                    self.after(
+                        300,
+                        lambda: self._preload_window_async(self._project.current_index),
+                    )
+                else:
+                    self._project.current_index = -1
+                    self._canvas.clear_all()
+                    self._box_list_panel.set_image(None)
+                    self._update_window_title()
+                    self._status_bar.warning(
+                        f'列表刷新完成: 当前筛选下没有匹配图片 (0/{count})'
+                    )
+                self._try_auto_folder_labels(dir_path)
+                self.after_idle(self._start_pending_weights_load)
+                return
             else:
+                self._thumb_panel.set_images(self._project.image_list)
                 restore_idx = self._resolve_last_image_index(dir_path)
                 msg_prefix = '扫描完成'
 
@@ -2390,15 +2511,17 @@ class AnnotationApp(tk.Tk):
         if self._project.goto_image(index):
             self._show_current_image_async()
     
-    def _show_current_image_async(self, clear_canvas: bool = True):
+    def _show_current_image_async(self, clear_canvas: bool = True, on_displayed=None):
         """Display current image using async loading (non-blocking)."""
         item = self._project.current_image
         if not item:
+            if on_displayed:
+                on_displayed()
             return
         
         # If already loaded, display immediately
         if item.is_loaded and item._pil_image:
-            self._display_current_image()
+            self._display_current_image(on_displayed=on_displayed)
             return
         
         # Load asynchronously
@@ -2408,27 +2531,35 @@ class AnnotationApp(tk.Tk):
         
         def _on_loaded(image_item, success):
             if success and self._project.current_image == image_item:
-                self._display_current_image()
+                self._display_current_image(on_displayed=on_displayed)
             elif not success:
                 if self._project.current_image is image_item:
                     self._canvas.clear_all()
                     self._box_list_panel.set_image(None)
                 self._status_bar.error(f'加载失败: {image_item.name}')
+                if on_displayed:
+                    on_displayed()
+            elif on_displayed:
+                on_displayed()
         
         self._image_loader.load_image_async(
             item, _on_loaded, main_thread_schedule=self._call_in_main,
         )
     
-    def _display_current_image(self):
+    def _display_current_image(self, on_displayed=None):
         """Actually display the loaded image on canvas (must be called on main thread)."""
         item = self._project.current_image
         if not item:
+            if on_displayed:
+                on_displayed()
             return
 
         self._last_displayed_index = self._project.current_index
         
         if not (item.is_loaded and item._pil_image):
             self._canvas.clear_all()
+            if on_displayed:
+                on_displayed()
             return
         
         # Load annotations before drawing so boxes appear with the image
@@ -2436,11 +2567,13 @@ class AnnotationApp(tk.Tk):
         
         self._canvas.set_image(item, item._pil_image)
         
+        image_list, center_index = self._visible_preload_window(self._project.current_index)
         self._image_loader.release_outside_window(
             self._project.image_list,
-            self._project.current_index,
+            center_index,
             forward=PRELOAD_FORWARD,
             backward=PRELOAD_BACKWARD,
+            window_image_list=image_list,
         )
         
         # Preload nearby images after the current frame is shown
@@ -2468,6 +2601,8 @@ class AnnotationApp(tk.Tk):
         
         # Update title
         self._update_window_title(item)
+        if on_displayed:
+            on_displayed()
     
     # --- Annotation operations ---
     
@@ -2766,6 +2901,8 @@ class AnnotationApp(tk.Tk):
         try:
             txt_path.parent.mkdir(parents=True, exist_ok=True)
             write_yolo_annotations_atomic(txt_path, item.annotations, w, h)
+            item._annotation_path_checked = True
+            item._annotation_file_path = txt_path
             item.mark_clean()
             class_ids = {annotation.class_id for annotation in item.annotations}
             if class_ids:

@@ -173,14 +173,25 @@ class AsyncImageLoader:
         center_index: int,
         forward: int = PRELOAD_FORWARD,
         backward: int = PRELOAD_BACKWARD,
+        window_image_list: Optional[List[ImageItem]] = None,
     ):
-        """Drop decoded pixels for images outside the preload window."""
+        """Drop decoded pixels outside a preload window.
+
+        ``image_list`` contains every item whose decoded pixels may be
+        released.  ``window_image_list`` may provide a filtered display order
+        for deciding which paths remain in memory.
+        """
         if not image_list:
             return
 
+        if window_image_list is None:
+            window_image_list = image_list
+        if center_index is None or not window_image_list:
+            return
+
         start = max(0, center_index - backward)
-        end = min(len(image_list), center_index + forward + 1)
-        keep_paths = {str(image_list[i].path) for i in range(start, end)}
+        end = min(len(window_image_list), center_index + forward + 1)
+        keep_paths = {str(window_image_list[i].path) for i in range(start, end)}
 
         for item in image_list:
             if str(item.path) not in keep_paths:

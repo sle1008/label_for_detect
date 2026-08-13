@@ -21,6 +21,7 @@ class AppConfig:
     last_label_file: str = ''
     last_weights_file: str = ''
     last_image_export_mode: str = 'copy'
+    last_image_export_directory: str = ''
     label_sort_by_name: bool = True
     confidence_threshold: float = 0.25
     window_geometry: str = '1400x900'

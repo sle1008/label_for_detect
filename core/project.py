@@ -98,7 +98,7 @@ class Project:
         self.current_index = 0 if self.image_list else -1
         self._visible_indices_snapshot = None
         self._coco_annotated_images = self._load_coco_annotation_index()
-        self.invalidate_filter_cache()
+        self.invalidate_label_cache()
         return len(self.image_list)
 
     def _candidate_coco_json_paths(self) -> List[Path]:

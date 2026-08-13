@@ -18,6 +18,8 @@ class ImageItem:
     is_dirty: bool = False
     is_loaded: bool = False
     _annotations_loaded: bool = False
+    _annotation_path_checked: bool = False
+    _annotation_file_path: Optional[Path] = None
     manual_annotation_status: Optional[str] = None  # annotated | unannotated | uncertain
     _pil_image: Optional[Image.Image] = None
     _photo_image: Optional[ImageTk.PhotoImage] = None

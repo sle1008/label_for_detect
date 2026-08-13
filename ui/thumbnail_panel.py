@@ -119,6 +119,8 @@ class ThumbnailPanel(tk.Frame):
 
         self._current_index: int = -1
 
+        self._styled_index: int = -1
+
         self._hover_index: int = -1
 
         self._filter_hint: str = ''
@@ -347,6 +349,8 @@ class ThumbnailPanel(tk.Frame):
         try:
             self._listbox.delete(0, 'end')
 
+            self._styled_index = -1
+
             if image_list:
                 self._listbox.insert('end', *[item.name for item in image_list])
                 self._refresh_row_styles()
@@ -449,11 +453,69 @@ class ThumbnailPanel(tk.Frame):
 
         self._current_index = -1
 
+        self._styled_index = -1
+
         self._listbox.delete(0, 'end')
 
         self._info_var.set('')
 
         self._update_scrollbar()
+
+    def full_indices(self) -> List[int]:
+        """Return the project indices currently represented by the list."""
+        return list(self._full_indices)
+
+    def set_interaction_enabled(self, enabled: bool):
+        """Temporarily freeze list input while its rows are being synchronized."""
+        self._listbox.configure(state='normal' if enabled else 'disabled')
+
+    def remove_full_index(self, full_index: int) -> bool:
+        """Remove one row and shift later project indices without rebuilding."""
+        try:
+            list_index = self._full_indices.index(full_index)
+        except ValueError:
+            self._full_indices = [
+                index - 1 if index > full_index else index
+                for index in self._full_indices
+            ]
+            return False
+
+        previous_current = self._current_index
+        self._suppress_select = True
+        try:
+            self._listbox.delete(list_index)
+            del self._image_list[list_index]
+            del self._full_indices[list_index]
+            self._full_indices = [
+                index - 1 if index > full_index else index
+                for index in self._full_indices
+            ]
+
+            if not self._image_list:
+                self._current_index = -1
+            elif previous_current > list_index:
+                self._current_index = previous_current - 1
+            elif previous_current == list_index:
+                # Let the normal image-display path apply the new highlight.
+                self._current_index = -1
+
+            if self._styled_index == list_index:
+                self._styled_index = -1
+            elif self._styled_index > list_index:
+                self._styled_index -= 1
+        finally:
+            self._suppress_select = False
+
+        total = len(self._image_list)
+        if total:
+            if self._filter_hint:
+                self._info_var.set(f'{self._filter_hint} {total} 张')
+            else:
+                self._info_var.set(f'共 {total} 张图片')
+        else:
+            self._info_var.set(self._filter_hint or '')
+        self.after_idle(self._update_scrollbar)
+        return True
 
 
 
@@ -461,31 +523,27 @@ class ThumbnailPanel(tk.Frame):
 
         """Paint current row with accent color (visible even when list loses focus)."""
 
-        total = self._listbox.size()
-
         cur = self._current_index
+        previous = self._styled_index
+        if previous != cur:
+            self._set_row_style(previous, False)
+        if 0 <= cur < self._listbox.size():
+            self._set_row_style(cur, True)
+            self._styled_index = cur
+        else:
+            self._styled_index = -1
 
-        for i in range(total):
-
-            if i == cur:
-
-                self._listbox.itemconfig(
-
-                    i, bg=UI_ACCENT, fg='white',
-
-                    selectbackground=UI_ACCENT, selectforeground='white',
-
-                )
-
-            else:
-
-                self._listbox.itemconfig(
-
-                    i, bg=UI_SURFACE_BG, fg=UI_TEXT_COLOR,
-
-                    selectbackground=UI_ACCENT, selectforeground='white',
-
-                )
+    def _set_row_style(self, index: int, current: bool):
+        """Update one row's persistent current-image styling."""
+        if not (0 <= index < self._listbox.size()):
+            return
+        self._listbox.itemconfig(
+            index,
+            bg=UI_ACCENT if current else UI_SURFACE_BG,
+            fg='white' if current else UI_TEXT_COLOR,
+            selectbackground=UI_ACCENT,
+            selectforeground='white',
+        )
 
 
 
@@ -506,9 +564,7 @@ class ThumbnailPanel(tk.Frame):
             index = selection[-1]
 
         if 0 <= index < len(self._image_list):
-
             self._current_index = index
-
             self._refresh_row_styles()
 
             if self._on_image_selected:

@@ -52,7 +52,7 @@ HANDLE_HIT_EXTRA = 8  # Extra hit padding beyond HANDLE_SIZE (screen px)
 # LRU cache settings (memory budget up to 8GB)
 MAX_CACHE_BYTES = 8 * 1024 * 1024 * 1024
 PRELOAD_FORWARD = 10
-PRELOAD_BACKWARD = 7
+PRELOAD_BACKWARD = 10
 # Legacy alias
 PRELOAD_NEIGHBORS = PRELOAD_FORWARD
 MAX_CACHE_SIZE = 200

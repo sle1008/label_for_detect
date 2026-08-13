@@ -61,10 +61,13 @@ def parse_yaml_labels(path: str) -> List[LabelDef]:
 
 
 def load_annotation_file(image_path: Path, label_manager,
-                         img_width: int = None, img_height: int = None) -> List[BBox]:
+                         img_width: int = None, img_height: int = None,
+                         txt_path: Path = None,
+                         annotation_path_resolved: bool = False) -> List[BBox]:
     """Load YOLO format annotation file for an image."""
     annotations = []
-    txt_path = resolve_annotation_txt_path(image_path)
+    if not annotation_path_resolved:
+        txt_path = resolve_annotation_txt_path(image_path)
     if txt_path is None:
         return annotations
     

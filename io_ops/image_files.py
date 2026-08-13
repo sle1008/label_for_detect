@@ -19,7 +19,10 @@ def delete_image_and_labels(item: ImageItem) -> Tuple[bool, str]:
             errors.append(f'无法删除图片: {e}')
 
     txt_paths = set()
-    resolved = resolve_annotation_txt_path(path)
+    if item._annotation_path_checked and item._annotation_file_path is not None:
+        resolved = item._annotation_file_path
+    else:
+        resolved = resolve_annotation_txt_path(path)
     if resolved:
         txt_paths.add(resolved)
     sidecar = path.with_suffix('.txt')

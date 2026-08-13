@@ -23,6 +23,7 @@ from io_ops.image_export import (
     CONFLICT_SKIP, EXPORT_MODE_COPY, EXPORT_MODE_MOVE,
     export_images_and_labels, find_export_conflicts,
 )
+from io_ops.image_files import delete_image_and_labels
 from io_ops.annotation_status import (
     infer_label_category_from_annotations,
     annotation_file_contains_class,
@@ -143,6 +144,30 @@ class AnnotationFileTests(unittest.TestCase):
                 result = preferred_annotation_txt_path(image)
 
             self.assertEqual(result, root / 'labels' / 'camera_a' / 'animal.txt')
+
+    def test_delete_uses_cached_annotation_path_without_rescanning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / 'images' / 'camera' / 'animal.jpg'
+            label = root / 'labels' / 'nested' / 'animal.txt'
+            image.parent.mkdir(parents=True)
+            label.parent.mkdir(parents=True)
+            image.write_bytes(b'image')
+            label.write_text('0 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+            item = ImageItem(image)
+            item._annotation_path_checked = True
+            item._annotation_file_path = label
+
+            with patch(
+                'io_ops.image_files.resolve_annotation_txt_path',
+                side_effect=AssertionError('cached path should avoid rescanning'),
+            ):
+                ok, error = delete_image_and_labels(item)
+
+            self.assertTrue(ok)
+            self.assertEqual(error, '')
+            self.assertFalse(image.exists())
+            self.assertFalse(label.exists())
 
     def test_infer_dominant_label_category(self):
         self.assertEqual(
@@ -1115,6 +1140,45 @@ class ImageExportModeDialogTests(unittest.TestCase):
             dialog.__init__(SimpleNamespace(), 1, default_mode='invalid')
 
         string_var.assert_called_once_with(value='copy')
+
+
+class ImageExportDirectoryTests(unittest.TestCase):
+    def test_uses_last_valid_image_export_directory(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            export_dir = root / 'previous_export'
+            image_dir = root / 'images'
+            export_dir.mkdir()
+            image_dir.mkdir()
+            app = SimpleNamespace(
+                _config=SimpleNamespace(
+                    last_image_export_directory=str(export_dir),
+                    last_directory=str(image_dir),
+                ),
+            )
+
+            initial = AnnotationApp._initial_image_export_directory(app)
+
+            self.assertEqual(initial, str(export_dir))
+
+    def test_missing_export_directory_falls_back_to_image_directory(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_dir = Path(tmp) / 'images'
+            image_dir.mkdir()
+            app = SimpleNamespace(
+                _config=SimpleNamespace(
+                    last_image_export_directory=str(Path(tmp) / 'missing'),
+                    last_directory=str(image_dir),
+                ),
+            )
+
+            initial = AnnotationApp._initial_image_export_directory(app)
+
+            self.assertEqual(initial, str(image_dir))
 
 
 class ClassesFileImportTests(unittest.TestCase):
