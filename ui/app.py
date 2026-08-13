@@ -778,7 +778,7 @@ class AnnotationApp(tk.Tk):
         destination_image_count = len(Project.scan_image_paths(str(output_dir)))
         summary = (
             f'已{action} {len(succeeded)} 张图片到：\n{output_dir}'
-            f'\n\n此目录内现有{destination_image_count}张图片。'
+            f'\n\n此目录内现有 {destination_image_count} 张图片。'
         )
         details = []
         if failed:
