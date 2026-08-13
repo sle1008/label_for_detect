@@ -964,7 +964,11 @@ class AnnotationApp(tk.Tk):
                 )
                 self._project.current_index = adjacent_index
         if not self._project.image_list:
-            self._finish_single_image_list_removal(full_index)
+            # There is no replacement image.  Rebuild the visible list from
+            # the post-delete project state so a one-item filtered list cannot
+            # retain its stale row mapping.
+            self._refresh_image_list_view(jump='keep', navigate=False)
+            self._thumb_panel.set_interaction_enabled(True)
             self._canvas.clear_all()
             self._box_list_panel.set_image(None)
             self._update_window_title()
@@ -973,7 +977,11 @@ class AnnotationApp(tk.Tk):
 
         if was_current:
             if self._project.current_image is None:
-                self._finish_single_image_list_removal(full_index)
+                # The deleted image was the only visible match.  The full
+                # project may still contain non-matching images, so refresh
+                # the active list rather than removing by the old index.
+                self._refresh_image_list_view(jump='keep', navigate=False)
+                self._thumb_panel.set_interaction_enabled(True)
                 self._canvas.clear_all()
                 self._box_list_panel.set_image(None)
                 self._update_window_title()
