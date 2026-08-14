@@ -719,6 +719,117 @@ class ProjectFilterTests(unittest.TestCase):
 
         self.assertIsNone(project.adjacent_visible_item_for_removal(2))
 
+    def test_batch_removal_replacement_prefers_next_visible_item(self):
+        from ui.app import AnnotationApp
+
+        items = [ImageItem(Path(f'{i}.jpg')) for i in range(5)]
+        replacement = AnnotationApp._batch_removal_replacement(
+            [items[0], items[2], items[4]], items[2], {id(items[2])},
+        )
+
+        self.assertIs(replacement, items[4])
+
+    def test_batch_removal_replacement_uses_previous_when_tail_removed(self):
+        from ui.app import AnnotationApp
+
+        items = [ImageItem(Path(f'{i}.jpg')) for i in range(5)]
+        replacement = AnnotationApp._batch_removal_replacement(
+            [items[0], items[2], items[4]],
+            items[2],
+            {id(items[2]), id(items[4])},
+        )
+
+        self.assertIs(replacement, items[0])
+
+    def test_batch_removal_replacement_keeps_undeleted_current_item(self):
+        from ui.app import AnnotationApp
+
+        items = [ImageItem(Path(f'{i}.jpg')) for i in range(3)]
+        replacement = AnnotationApp._batch_removal_replacement(
+            items, items[1], {id(items[0]), id(items[2])},
+        )
+
+        self.assertIs(replacement, items[1])
+
+    def test_batch_removal_replacement_is_empty_when_all_visible_items_removed(self):
+        from ui.app import AnnotationApp
+
+        items = [ImageItem(Path(f'{i}.jpg')) for i in range(3)]
+        replacement = AnnotationApp._batch_removal_replacement(
+            [items[0], items[2]],
+            items[2],
+            {id(items[0]), id(items[2])},
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_thumbnail_batch_selection_collapses_to_current_row(self):
+        from ui.thumbnail_panel import ThumbnailPanel
+
+        class FakeListbox:
+            def __init__(self):
+                self.selected = {1, 2, 3}
+
+            def selection_clear(self, _first, _last):
+                self.selected.clear()
+
+            def selection_set(self, index):
+                self.selected.add(index)
+
+            def size(self):
+                return 5
+
+        panel = SimpleNamespace(
+            _suppress_select=False,
+            _current_index=3,
+            _listbox=FakeListbox(),
+            _refresh_row_styles=lambda: None,
+        )
+
+        ThumbnailPanel.select_only_current(panel)
+
+        self.assertEqual(panel._listbox.selected, {3})
+        self.assertFalse(panel._suppress_select)
+
+    def test_batch_delete_keeps_navigation_in_filtered_visible_order(self):
+        from ui.app import AnnotationApp
+
+        project = Project()
+        project.set_image_paths('.', [Path(f'{i}.jpg') for i in range(5)])
+        original_items = list(project.image_list)
+        project.current_index = 2
+        project.set_visible_indices([0, 2, 4])
+        calls = []
+        app = SimpleNamespace(
+            _project=project,
+            _save_before_navigate=lambda: True,
+            _format_image_path=lambda item: item.name,
+            _image_loader=SimpleNamespace(evict_path=lambda path: None),
+            _filter_status_snapshot={},
+            _batch_removal_replacement=AnnotationApp._batch_removal_replacement,
+            _refresh_image_list_view=lambda **kwargs: None,
+            _thumb_panel=SimpleNamespace(
+                select_only_current=lambda: calls.append('select'),
+                clear=lambda: calls.append('clear'),
+            ),
+            _show_current_image_async=lambda **kwargs: calls.append('show'),
+            _canvas=SimpleNamespace(clear_all=lambda: calls.append('canvas')),
+            _box_list_panel=SimpleNamespace(set_image=lambda item: None),
+            _update_window_title=lambda: None,
+            _status_bar=SimpleNamespace(
+                warning=lambda message: None,
+                success=lambda message: None,
+            ),
+        )
+
+        with patch('ui.app.askyesno', return_value=True), patch(
+            'ui.app.delete_image_and_labels', return_value=(True, ''),
+        ):
+            AnnotationApp._delete_images(app, [2])
+
+        self.assertIs(project.current_image, original_items[4])
+        self.assertEqual(calls, ['select', 'show'])
+
     def test_resolve_refresh_index_keeps_current(self):
         paths = [Path('a.jpg'), Path('b.jpg'), Path('c.jpg')]
         idx = Project.resolve_refresh_index(

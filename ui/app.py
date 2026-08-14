@@ -867,6 +867,23 @@ class AnnotationApp(tk.Tk):
         else:
             self._thumb_panel.set_current_by_full_index(self._project.current_index)
 
+    @staticmethod
+    def _batch_removal_replacement(visible_items, current_item, removed_ids):
+        """Choose the next visible item after a batch removes the current one."""
+        if current_item is None or id(current_item) not in removed_ids:
+            return current_item
+        try:
+            position = visible_items.index(current_item)
+        except ValueError:
+            return None
+        for item in visible_items[position + 1:]:
+            if id(item) not in removed_ids:
+                return item
+        for item in reversed(visible_items[:position]):
+            if id(item) not in removed_ids:
+                return item
+        return None
+
     def _delete_images(self, indices):
         indices = sorted(set(indices), reverse=True)
         if not indices:
@@ -879,7 +896,14 @@ class AnnotationApp(tk.Tk):
         if not self._save_before_navigate():
             return
 
+        visible_items = [
+            self._project.image_list[index]
+            for index in self._project.get_visible_indices()
+            if 0 <= index < len(self._project.image_list)
+        ]
+        current_item = self._project.current_image
         failed = []
+        removed_ids = set()
         for index in indices:
             if not (0 <= index < len(self._project.image_list)):
                 continue
@@ -890,14 +914,30 @@ class AnnotationApp(tk.Tk):
                 continue
             self._image_loader.evict_path(item.path)
             self._filter_status_snapshot.pop(id(item), None)
+            removed_ids.add(id(item))
             self._project.remove_image_at(index)
 
+        replacement = self._batch_removal_replacement(
+            visible_items, current_item, removed_ids,
+        )
+        replacement_index = (
+            next((
+                index for index, item in enumerate(self._project.image_list)
+                if item is replacement
+            ), -1)
+            if replacement is not None else -1
+        )
+        self._project.current_index = replacement_index
+
         if self._project.image_list:
-            self._project.current_index = min(
-                max(0, self._project.current_index), len(self._project.image_list) - 1,
-            )
             self._refresh_image_list_view(jump='keep', navigate=False)
-            self._show_current_image_async(clear_canvas=False)
+            if replacement_index >= 0:
+                self._thumb_panel.select_only_current()
+                self._show_current_image_async(clear_canvas=False)
+            else:
+                self._canvas.clear_all()
+                self._box_list_panel.set_image(None)
+                self._update_window_title()
         else:
             self._canvas.clear_all()
             self._box_list_panel.set_image(None)

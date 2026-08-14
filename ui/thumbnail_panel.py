@@ -469,6 +469,17 @@ class ThumbnailPanel(tk.Frame):
         """Temporarily freeze list input while its rows are being synchronized."""
         self._listbox.configure(state='normal' if enabled else 'disabled')
 
+    def select_only_current(self):
+        """Discard a completed batch selection and retain only the current row."""
+        self._suppress_select = True
+        try:
+            self._listbox.selection_clear(0, 'end')
+            if 0 <= self._current_index < self._listbox.size():
+                self._listbox.selection_set(self._current_index)
+            self._refresh_row_styles()
+        finally:
+            self._suppress_select = False
+
     def remove_full_index(self, full_index: int) -> bool:
         """Remove one row and shift later project indices without rebuilding."""
         try:
