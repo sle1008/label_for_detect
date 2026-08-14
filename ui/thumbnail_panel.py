@@ -491,6 +491,22 @@ class ThumbnailPanel(tk.Frame):
             ]
             return False
 
+        return self._remove_list_index(list_index, full_index)
+
+    def remove_item(self, item: ImageItem) -> bool:
+        """Remove the row for an exact item without trusting a stale index."""
+        try:
+            list_index = next(
+                index for index, candidate in enumerate(self._image_list)
+                if candidate is item
+            )
+        except StopIteration:
+            return False
+        return self._remove_list_index(list_index, self._full_indices[list_index])
+
+    def _remove_list_index(self, list_index: int, full_index: int) -> bool:
+        """Remove a known row and shift the remaining project-index mapping."""
+
         previous_current = self._current_index
         self._suppress_select = True
         try:

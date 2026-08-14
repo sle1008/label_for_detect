@@ -791,6 +791,70 @@ class ProjectFilterTests(unittest.TestCase):
         self.assertEqual(panel._listbox.selected, {3})
         self.assertFalse(panel._suppress_select)
 
+    def test_delayed_item_removal_does_not_delete_rebuilt_row_by_old_index(self):
+        from ui.thumbnail_panel import ThumbnailPanel
+
+        first = ImageItem(Path('first.jpg'))
+        removed = ImageItem(Path('removed.jpg'))
+        last = ImageItem(Path('last.jpg'))
+        calls = []
+        panel = SimpleNamespace(
+            _image_list=[first, last],
+            _full_indices=[0, 1],
+            _remove_list_index=lambda *args: calls.append(args),
+        )
+
+        result = ThumbnailPanel.remove_item(panel, removed)
+
+        self.assertFalse(result)
+        self.assertEqual(calls, [])
+        self.assertEqual(panel._image_list, [first, last])
+        self.assertEqual(panel._full_indices, [0, 1])
+
+    def test_delayed_item_removal_uses_current_row_mapping(self):
+        from ui.thumbnail_panel import ThumbnailPanel
+
+        first = ImageItem(Path('first.jpg'))
+        removed = ImageItem(Path('removed.jpg'))
+        calls = []
+        panel = SimpleNamespace(
+            _image_list=[first, removed],
+            _full_indices=[3, 7],
+            _remove_list_index=lambda *args: calls.append(args) or True,
+        )
+
+        result = ThumbnailPanel.remove_item(panel, removed)
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [(1, 7)])
+
+    def test_single_delete_falls_back_to_refresh_when_row_already_rebuilt(self):
+        from ui.app import AnnotationApp
+
+        calls = []
+        app = SimpleNamespace(
+            _thumb_panel=SimpleNamespace(
+                remove_item=lambda item: False,
+                set_interaction_enabled=lambda enabled: calls.append(
+                    ('interaction', enabled)
+                ),
+            ),
+            _project=SimpleNamespace(current_image=None),
+            _refresh_image_list_view=lambda **kwargs: calls.append(('refresh', kwargs)),
+        )
+
+        AnnotationApp._finish_single_image_list_removal(
+            app, ImageItem(Path('removed.jpg')),
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ('refresh', {'jump': 'keep', 'navigate': False}),
+                ('interaction', True),
+            ],
+        )
+
     def test_batch_delete_keeps_navigation_in_filtered_visible_order(self):
         from ui.app import AnnotationApp
 
@@ -829,6 +893,88 @@ class ProjectFilterTests(unittest.TestCase):
 
         self.assertIs(project.current_image, original_items[4])
         self.assertEqual(calls, ['select', 'show'])
+
+    def test_background_move_removes_item_and_selects_visible_replacement(self):
+        from ui.app import AnnotationApp
+
+        project = Project()
+        project.set_image_paths('.', [Path(f'{i}.jpg') for i in range(5)])
+        original_items = list(project.image_list)
+        visible_items = [original_items[0], original_items[2], original_items[4]]
+        project.current_index = 2
+        project.set_visible_indices([0, 2, 4])
+        calls = []
+        app = SimpleNamespace(
+            _project=project,
+            _image_loader=SimpleNamespace(evict_path=lambda path: None),
+            _filter_status_snapshot={},
+            _image_undo_managers={},
+            _navigation_undo_stack=[],
+            _refresh_image_list_view=lambda **kwargs: calls.append('refresh'),
+            _thumb_panel=SimpleNamespace(
+                select_only_current=lambda: calls.append('select'),
+                set_current_by_full_index=lambda index: calls.append(('current', index)),
+            ),
+            _show_current_image_async=lambda **kwargs: calls.append('show'),
+            _canvas=SimpleNamespace(clear_all=lambda: calls.append('canvas')),
+            _box_list_panel=SimpleNamespace(set_image=lambda item: None),
+            _update_window_title=lambda: None,
+        )
+
+        AnnotationApp._remove_moved_export_items(
+            app, [original_items[2]], visible_items, original_items[2],
+        )
+
+        self.assertNotIn(original_items[2], project.image_list)
+        self.assertIs(project.current_image, original_items[4])
+        self.assertEqual(calls, ['refresh', 'select', 'show'])
+
+    def test_missing_image_self_heals_list_and_selects_next_visible_item(self):
+        from ui.app import AnnotationApp
+
+        project = Project()
+        project.set_image_paths('.', [Path(f'{i}.jpg') for i in range(5)])
+        original_items = list(project.image_list)
+        project.current_index = 2
+        project.set_visible_indices([0, 2, 4])
+        calls = []
+        app = SimpleNamespace(
+            _project=project,
+            _batch_removal_replacement=AnnotationApp._batch_removal_replacement,
+            _image_loader=SimpleNamespace(evict_path=lambda path: None),
+            _filter_status_snapshot={},
+            _image_undo_managers={},
+            _navigation_undo_stack=[original_items[2]],
+            _refresh_image_list_view=lambda **kwargs: calls.append('refresh'),
+            _thumb_panel=SimpleNamespace(
+                select_only_current=lambda: calls.append('select'),
+            ),
+            _show_current_image_async=lambda **kwargs: calls.append('show'),
+            _canvas=SimpleNamespace(clear_all=lambda: calls.append('canvas')),
+            _box_list_panel=SimpleNamespace(set_image=lambda item: None),
+            _update_window_title=lambda: None,
+        )
+
+        removed = AnnotationApp._remove_missing_image_item(app, original_items[2])
+
+        self.assertTrue(removed)
+        self.assertNotIn(original_items[2], project.image_list)
+        self.assertIs(project.current_image, original_items[4])
+        self.assertEqual(app._navigation_undo_stack, [])
+        self.assertEqual(calls, ['refresh', 'select', 'show'])
+
+    def test_existing_image_is_not_removed_by_missing_image_self_heal(self):
+        from ui.app import AnnotationApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'exists.jpg'
+            path.write_bytes(b'image')
+            item = ImageItem(path)
+            app = SimpleNamespace()
+
+            removed = AnnotationApp._remove_missing_image_item(app, item)
+
+            self.assertFalse(removed)
 
     def test_resolve_refresh_index_keeps_current(self):
         paths = [Path('a.jpg'), Path('b.jpg'), Path('c.jpg')]

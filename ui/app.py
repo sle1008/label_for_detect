@@ -863,9 +863,11 @@ class AnnotationApp(tk.Tk):
             self._update_window_title()
             return
         if current_was_moved:
+            self._thumb_panel.select_only_current()
             self._show_current_image_async(clear_canvas=False)
         else:
             self._thumb_panel.set_current_by_full_index(self._project.current_index)
+            self._thumb_panel.select_only_current()
 
     @staticmethod
     def _batch_removal_replacement(visible_items, current_item, removed_ids):
@@ -1030,14 +1032,12 @@ class AnnotationApp(tk.Tk):
                 self._box_list_panel.set_image(None)
                 self._update_window_title()
             else:
-                self._show_current_image_async(
-                    clear_canvas=False,
-                    on_displayed=lambda index=full_index: self.after(
-                        50, self._finish_single_image_list_removal, index,
-                    ),
+                self._show_current_image_async(clear_canvas=False)
+                self.after(
+                    50, self._finish_single_image_list_removal, item,
                 )
         else:
-            self._finish_single_image_list_removal(full_index)
+            self._finish_single_image_list_removal(item)
             self._thumb_panel.set_current_by_full_index(self._project.current_index)
 
         if err:
@@ -1045,11 +1045,13 @@ class AnnotationApp(tk.Tk):
         else:
             self._status_bar.success(f'已删除: {display_name}')
 
-    def _finish_single_image_list_removal(self, full_index: int):
-        """Update the left list after the replacement image has been painted."""
+    def _finish_single_image_list_removal(self, removed_item: ImageItem):
+        """Synchronize the left list after a single-image deletion."""
         try:
-            self._thumb_panel.remove_full_index(full_index)
-            self._project.set_visible_indices(self._thumb_panel.full_indices())
+            if self._thumb_panel.remove_item(removed_item):
+                self._project.set_visible_indices(self._thumb_panel.full_indices())
+            else:
+                self._refresh_image_list_view(jump='keep', navigate=False)
             if self._project.current_image is not None:
                 self._thumb_panel.set_current_by_full_index(self._project.current_index)
         finally:
@@ -2562,7 +2564,53 @@ class AnnotationApp(tk.Tk):
             return
         if self._project.goto_image(index):
             self._show_current_image_async()
-    
+
+    def _remove_missing_image_item(self, missing_item: ImageItem) -> bool:
+        """Remove an externally deleted image from project and visible-list state."""
+        if missing_item.path.is_file():
+            return False
+        try:
+            full_index = next(
+                index for index, item in enumerate(self._project.image_list)
+                if item is missing_item
+            )
+        except StopIteration:
+            return False
+
+        visible_items = [
+            self._project.image_list[index]
+            for index in self._project.get_visible_indices()
+            if 0 <= index < len(self._project.image_list)
+        ]
+        replacement = self._batch_removal_replacement(
+            visible_items, missing_item, {id(missing_item)},
+        )
+        self._image_loader.evict_path(missing_item.path)
+        self._filter_status_snapshot.pop(id(missing_item), None)
+        self._image_undo_managers.pop(id(missing_item), None)
+        self._project.remove_image_at(full_index)
+        self._navigation_undo_stack = [
+            item for item in self._navigation_undo_stack if item is not missing_item
+        ]
+
+        replacement_index = next(
+            (
+                index for index, item in enumerate(self._project.image_list)
+                if item is replacement
+            ),
+            -1,
+        )
+        self._project.current_index = replacement_index
+        self._refresh_image_list_view(jump='keep', navigate=False)
+        if replacement_index >= 0:
+            self._thumb_panel.select_only_current()
+            self._show_current_image_async(clear_canvas=False)
+        else:
+            self._canvas.clear_all()
+            self._box_list_panel.set_image(None)
+            self._update_window_title()
+        return True
+
     def _show_current_image_async(self, clear_canvas: bool = True, on_displayed=None):
         """Display current image using async loading (non-blocking)."""
         item = self._project.current_image
@@ -2585,6 +2633,16 @@ class AnnotationApp(tk.Tk):
             if success and self._project.current_image == image_item:
                 self._display_current_image(on_displayed=on_displayed)
             elif not success:
+                if (
+                    self._project.current_image is image_item
+                    and self._remove_missing_image_item(image_item)
+                ):
+                    self._status_bar.warning(
+                        f'图片文件已不存在，已从列表移除: {image_item.name}'
+                    )
+                    if on_displayed:
+                        on_displayed()
+                    return
                 if self._project.current_image is image_item:
                     self._canvas.clear_all()
                     self._box_list_panel.set_image(None)
