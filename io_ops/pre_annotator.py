@@ -10,7 +10,16 @@ from core.image_item import ImageItem
 from core.label_manager import LabelManager
 from utils.constants import DEFAULT_CONFIDENCE_THRESHOLD
 
+
+# ==================== 推理参数设置区 ====================
+# 原生 PyTorch 检测头同时包含 one-to-one 分支时，优先使用无 NMS 的端到端推理。
+# 不支持该分支的模型继续使用 Ultralytics 默认的 one-to-many + NMS 流程。
+PREFER_ONE_TO_ONE_INFERENCE = True
+
 SUPPORTED_WEIGHT_EXTENSIONS: Set[str] = {'.pt', '.onnx', '.engine', '.trt'}
+INFERENCE_MODE_ONE_TO_ONE = 'one-to-one'
+INFERENCE_MODE_ONE_TO_MANY_NMS = 'one-to-many+NMS'
+INFERENCE_MODE_BACKEND_AUTO = 'backend-auto'
 
 
 class PreAnnotator:
@@ -21,6 +30,7 @@ class PreAnnotator:
         self._model_path: Optional[str] = None
         self._cancel_event = threading.Event()
         self._busy = False
+        self._inference_mode = INFERENCE_MODE_ONE_TO_MANY_NMS
     
     @property
     def is_loaded(self) -> bool:
@@ -33,6 +43,55 @@ class PreAnnotator:
     @property
     def model_path(self) -> Optional[str]:
         return self._model_path
+
+    @property
+    def inference_mode(self) -> str:
+        return self._inference_mode
+
+    @staticmethod
+    def _native_detection_head(model):
+        """返回原生 PyTorch 模型的检测头；导出后端由 Ultralytics 自动处理。"""
+        native_model = getattr(model, 'model', None)
+        layers = getattr(native_model, 'model', None)
+        if layers is None:
+            return None
+        try:
+            return layers[-1]
+        except (IndexError, KeyError, TypeError):
+            return None
+
+    def _configure_inference_mode(self) -> str:
+        """优先启用 one-to-one；不支持时保留标准 NMS 推理。"""
+        head = self._native_detection_head(self._model)
+        if head is None:
+            # ONNX/TensorRT 的推理图已经固化，后端会依据输出形状和元数据
+            # 自动判断是否为端到端模型，运行时不应修改其网络结构。
+            self._inference_mode = INFERENCE_MODE_BACKEND_AUTO
+            return self._inference_mode
+
+        one_to_one = None
+        try:
+            one_to_one = getattr(head, 'one2one', None)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+        supports_one_to_one = (
+            isinstance(one_to_one, dict)
+            and bool(one_to_one)
+            and all(branch is not None for branch in one_to_one.values())
+        )
+        if PREFER_ONE_TO_ONE_INFERENCE and supports_one_to_one:
+            try:
+                head.end2end = True
+                if bool(getattr(head, 'end2end', False)):
+                    self._inference_mode = INFERENCE_MODE_ONE_TO_ONE
+                    return self._inference_mode
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+
+        # 普通检测头由 Ultralytics 的预测器执行 one-to-many 后处理和 NMS。
+        self._inference_mode = INFERENCE_MODE_ONE_TO_MANY_NMS
+        return self._inference_mode
     
     def load_weights(self, path: str) -> bool:
         """Load YOLO model weights (.pt / .onnx / .engine / .trt)."""
@@ -48,6 +107,7 @@ class PreAnnotator:
             from ultralytics import YOLO
             self._model = YOLO(path)
             self._model_path = path
+            self._configure_inference_mode()
             return True
         except Exception as e:
             print(f"Failed to load model ({path}): {e}")
@@ -60,6 +120,7 @@ class PreAnnotator:
                 print('ONNX 推理需要安装: pip install onnxruntime')
             self._model = None
             self._model_path = None
+            self._inference_mode = INFERENCE_MODE_ONE_TO_MANY_NMS
             return False
     
     def predict(self, image_path: Path, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,

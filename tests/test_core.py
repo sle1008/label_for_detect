@@ -24,12 +24,70 @@ from io_ops.image_export import (
     export_images_and_labels, find_export_conflicts,
 )
 from io_ops.image_files import delete_image_and_labels
+from io_ops.pre_annotator import (
+    INFERENCE_MODE_BACKEND_AUTO,
+    INFERENCE_MODE_ONE_TO_MANY_NMS,
+    INFERENCE_MODE_ONE_TO_ONE,
+    PreAnnotator,
+)
 from io_ops.annotation_status import (
     infer_label_category_from_annotations,
     annotation_file_contains_class,
     preferred_annotation_txt_path,
 )
 from utils.geometry import yolo_to_pixel, pixel_to_yolo
+
+
+class PreAnnotatorInferenceModeTests(unittest.TestCase):
+    @staticmethod
+    def _annotator_with_head(head):
+        annotator = PreAnnotator()
+        annotator._model = SimpleNamespace(
+            model=SimpleNamespace(model=[head])
+        )
+        return annotator
+
+    def test_prefers_one_to_one_when_detection_head_supports_it(self):
+        head = SimpleNamespace(
+            one2one={'box_head': object(), 'cls_head': object()},
+            end2end=False,
+        )
+        annotator = self._annotator_with_head(head)
+
+        mode = annotator._configure_inference_mode()
+
+        self.assertEqual(mode, INFERENCE_MODE_ONE_TO_ONE)
+        self.assertTrue(head.end2end)
+
+    def test_falls_back_to_one_to_many_when_one_to_one_is_unavailable(self):
+        head = SimpleNamespace(end2end=False)
+        annotator = self._annotator_with_head(head)
+
+        mode = annotator._configure_inference_mode()
+
+        self.assertEqual(mode, INFERENCE_MODE_ONE_TO_MANY_NMS)
+        self.assertFalse(head.end2end)
+
+    def test_exported_backend_keeps_its_embedded_inference_mode(self):
+        annotator = PreAnnotator()
+        annotator._model = SimpleNamespace(model='model.onnx')
+
+        mode = annotator._configure_inference_mode()
+
+        self.assertEqual(mode, INFERENCE_MODE_BACKEND_AUTO)
+
+    def test_configuration_can_keep_standard_nms_mode(self):
+        head = SimpleNamespace(
+            one2one={'box_head': object(), 'cls_head': object()},
+            end2end=False,
+        )
+        annotator = self._annotator_with_head(head)
+
+        with patch('io_ops.pre_annotator.PREFER_ONE_TO_ONE_INFERENCE', False):
+            mode = annotator._configure_inference_mode()
+
+        self.assertEqual(mode, INFERENCE_MODE_ONE_TO_MANY_NMS)
+        self.assertFalse(head.end2end)
 
 
 class GeometryTests(unittest.TestCase):
