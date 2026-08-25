@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -25,6 +25,7 @@ from io_ops.image_export import (
 )
 from io_ops.image_files import delete_image_and_labels
 from io_ops.pre_annotator import (
+    DEFAULT_INFERENCE_MODE,
     INFERENCE_MODE_BACKEND_AUTO,
     INFERENCE_MODE_ONE_TO_MANY_NMS,
     INFERENCE_MODE_ONE_TO_ONE,
@@ -47,14 +48,31 @@ class PreAnnotatorInferenceModeTests(unittest.TestCase):
         )
         return annotator
 
-    def test_prefers_one_to_one_when_detection_head_supports_it(self):
+    def test_default_mode_uses_one_to_many_nms(self):
         head = SimpleNamespace(
             one2one={'box_head': object(), 'cls_head': object()},
-            end2end=False,
+            cv2=object(),
+            cv3=object(),
+            end2end=True,
         )
         annotator = self._annotator_with_head(head)
 
         mode = annotator._configure_inference_mode()
+
+        self.assertEqual(DEFAULT_INFERENCE_MODE, INFERENCE_MODE_ONE_TO_MANY_NMS)
+        self.assertEqual(mode, INFERENCE_MODE_ONE_TO_MANY_NMS)
+        self.assertFalse(head.end2end)
+
+    def test_selects_one_to_one_when_detection_head_supports_it(self):
+        head = SimpleNamespace(
+            one2one={'box_head': object(), 'cls_head': object()},
+            cv2=object(),
+            cv3=object(),
+            end2end=False,
+        )
+        annotator = self._annotator_with_head(head)
+
+        mode = annotator.set_inference_mode(INFERENCE_MODE_ONE_TO_ONE)
 
         self.assertEqual(mode, INFERENCE_MODE_ONE_TO_ONE)
         self.assertTrue(head.end2end)
@@ -63,7 +81,7 @@ class PreAnnotatorInferenceModeTests(unittest.TestCase):
         head = SimpleNamespace(end2end=False)
         annotator = self._annotator_with_head(head)
 
-        mode = annotator._configure_inference_mode()
+        mode = annotator.set_inference_mode(INFERENCE_MODE_ONE_TO_ONE)
 
         self.assertEqual(mode, INFERENCE_MODE_ONE_TO_MANY_NMS)
         self.assertFalse(head.end2end)
@@ -76,18 +94,67 @@ class PreAnnotatorInferenceModeTests(unittest.TestCase):
 
         self.assertEqual(mode, INFERENCE_MODE_BACKEND_AUTO)
 
-    def test_configuration_can_keep_standard_nms_mode(self):
+    def test_selecting_one_to_many_disables_end_to_end_head(self):
         head = SimpleNamespace(
             one2one={'box_head': object(), 'cls_head': object()},
-            end2end=False,
+            cv2=object(),
+            cv3=object(),
+            end2end=True,
         )
         annotator = self._annotator_with_head(head)
 
-        with patch('io_ops.pre_annotator.PREFER_ONE_TO_ONE_INFERENCE', False):
-            mode = annotator._configure_inference_mode()
+        mode = annotator.set_inference_mode(INFERENCE_MODE_ONE_TO_MANY_NMS)
 
         self.assertEqual(mode, INFERENCE_MODE_ONE_TO_MANY_NMS)
         self.assertFalse(head.end2end)
+
+    def test_mode_selection_during_prediction_waits_for_next_task(self):
+        head = SimpleNamespace(
+            one2one={'box_head': object(), 'cls_head': object()},
+            cv2=object(),
+            cv3=object(),
+            end2end=False,
+        )
+        annotator = self._annotator_with_head(head)
+        annotator.set_inference_mode(INFERENCE_MODE_ONE_TO_ONE)
+        annotator._busy = True
+
+        mode = annotator.set_inference_mode(INFERENCE_MODE_ONE_TO_MANY_NMS)
+
+        self.assertEqual(mode, INFERENCE_MODE_ONE_TO_ONE)
+        self.assertTrue(head.end2end)
+        annotator._busy = False
+        self.assertEqual(
+            annotator._configure_inference_mode(),
+            INFERENCE_MODE_ONE_TO_MANY_NMS,
+        )
+        self.assertFalse(head.end2end)
+
+    def test_switching_back_to_nms_reloads_fused_native_model(self):
+        head = SimpleNamespace(
+            one2one={'box_head': object(), 'cls_head': object()},
+            cv2=None,
+            cv3=None,
+            end2end=True,
+        )
+        annotator = self._annotator_with_head(head)
+        annotator._model_path = 'model.pt'
+        restored_head = SimpleNamespace(
+            one2one={'box_head': object(), 'cls_head': object()},
+            cv2=object(),
+            cv3=object(),
+            end2end=False,
+        )
+        replacement = SimpleNamespace(model=SimpleNamespace(model=[restored_head]))
+        ultralytics_module = ModuleType('ultralytics')
+        ultralytics_module.YOLO = lambda path: replacement
+
+        with patch.dict(sys.modules, {'ultralytics': ultralytics_module}):
+            mode = annotator.set_inference_mode(INFERENCE_MODE_ONE_TO_MANY_NMS)
+
+        self.assertEqual(mode, INFERENCE_MODE_ONE_TO_MANY_NMS)
+        self.assertIs(annotator._model, replacement)
+        self.assertFalse(restored_head.end2end)
 
 
 class GeometryTests(unittest.TestCase):

@@ -12,14 +12,12 @@ from utils.constants import DEFAULT_CONFIDENCE_THRESHOLD
 
 
 # ==================== 推理参数设置区 ====================
-# 原生 PyTorch 检测头同时包含 one-to-one 分支时，优先使用无 NMS 的端到端推理。
-# 不支持该分支的模型继续使用 Ultralytics 默认的 one-to-many + NMS 流程。
-PREFER_ONE_TO_ONE_INFERENCE = True
-
-SUPPORTED_WEIGHT_EXTENSIONS: Set[str] = {'.pt', '.onnx', '.engine', '.trt'}
+# 菜单未指定其他模式时，使用兼容性更好的标准检测和 NMS 后处理。
 INFERENCE_MODE_ONE_TO_ONE = 'one-to-one'
 INFERENCE_MODE_ONE_TO_MANY_NMS = 'one-to-many+NMS'
 INFERENCE_MODE_BACKEND_AUTO = 'backend-auto'
+DEFAULT_INFERENCE_MODE = INFERENCE_MODE_ONE_TO_MANY_NMS
+SUPPORTED_WEIGHT_EXTENSIONS: Set[str] = {'.pt', '.onnx', '.engine', '.trt'}
 
 
 class PreAnnotator:
@@ -30,7 +28,8 @@ class PreAnnotator:
         self._model_path: Optional[str] = None
         self._cancel_event = threading.Event()
         self._busy = False
-        self._inference_mode = INFERENCE_MODE_ONE_TO_MANY_NMS
+        self._requested_inference_mode = DEFAULT_INFERENCE_MODE
+        self._inference_mode = DEFAULT_INFERENCE_MODE
     
     @property
     def is_loaded(self) -> bool:
@@ -51,6 +50,8 @@ class PreAnnotator:
     @staticmethod
     def _native_detection_head(model):
         """返回原生 PyTorch 模型的检测头；导出后端由 Ultralytics 自动处理。"""
+        if model is None:
+            return None
         native_model = getattr(model, 'model', None)
         layers = getattr(native_model, 'model', None)
         if layers is None:
@@ -60,8 +61,81 @@ class PreAnnotator:
         except (IndexError, KeyError, TypeError):
             return None
 
+    def _sync_active_predictor_mode(self, end2end: bool):
+        """同步已创建的预测后端，避免菜单切换后继续沿用旧检测分支。"""
+        predictor = getattr(self._model, 'predictor', None)
+        backend = getattr(predictor, 'model', None)
+        if backend is None:
+            return
+
+        backend_head = self._native_detection_head(backend)
+        if backend_head is not None:
+            try:
+                backend_head.end2end = end2end
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+        try:
+            backend.end2end = end2end
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    @staticmethod
+    def _has_one_to_many_head(head) -> bool:
+        """判断检测头是否仍保留 one-to-many 分支。"""
+        return (
+            getattr(head, 'cv2', None) is not None
+            and getattr(head, 'cv3', None) is not None
+        )
+
+    @staticmethod
+    def _supports_one_to_one(head) -> bool:
+        """判断检测头是否包含完整的 one-to-one 分支。"""
+        one_to_one = None
+        try:
+            one_to_one = getattr(head, 'one2one', None)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        return (
+            isinstance(one_to_one, dict)
+            and bool(one_to_one)
+            and all(branch is not None for branch in one_to_one.values())
+        )
+
+    def _prepare_native_model_for_branch_switching(self) -> bool:
+        """预先融合原生模型，同时保留两套可切换的检测分支。"""
+        head = self._native_detection_head(self._model)
+        if head is None or not self._supports_one_to_one(head):
+            return True
+
+        try:
+            head.end2end = False
+            native_model = getattr(self._model, 'model', None)
+            fuse = getattr(native_model, 'fuse', None)
+            if callable(fuse):
+                try:
+                    fuse(verbose=False)
+                except TypeError:
+                    fuse()
+            return self._has_one_to_many_head(head)
+        except Exception as exc:
+            print(f'Failed to prepare switchable inference branches: {exc}')
+            return False
+
+    def _reload_native_model(self) -> bool:
+        """重新载入原生权重，恢复被端到端融合移除的普通检测分支。"""
+        if not self._model_path or Path(self._model_path).suffix.lower() != '.pt':
+            return False
+        try:
+            from ultralytics import YOLO
+
+            self._model = YOLO(self._model_path)
+            return self._prepare_native_model_for_branch_switching()
+        except Exception as exc:
+            print(f'Failed to reload model ({self._model_path}): {exc}')
+            return False
+
     def _configure_inference_mode(self) -> str:
-        """优先启用 one-to-one；不支持时保留标准 NMS 推理。"""
+        """根据用户选择配置检测分支，不支持时回落到标准 NMS。"""
         head = self._native_detection_head(self._model)
         if head is None:
             # ONNX/TensorRT 的推理图已经固化，后端会依据输出形状和元数据
@@ -69,29 +143,65 @@ class PreAnnotator:
             self._inference_mode = INFERENCE_MODE_BACKEND_AUTO
             return self._inference_mode
 
-        one_to_one = None
-        try:
-            one_to_one = getattr(head, 'one2one', None)
-        except (AttributeError, RuntimeError, TypeError):
-            pass
-
-        supports_one_to_one = (
-            isinstance(one_to_one, dict)
-            and bool(one_to_one)
-            and all(branch is not None for branch in one_to_one.values())
-        )
-        if PREFER_ONE_TO_ONE_INFERENCE and supports_one_to_one:
+        supports_one_to_one = self._supports_one_to_one(head)
+        if (
+            self._requested_inference_mode == INFERENCE_MODE_ONE_TO_MANY_NMS
+            and supports_one_to_one
+            and not self._has_one_to_many_head(head)
+        ):
+            # Ultralytics 在端到端融合时会移除 one-to-many 分支，切回 NMS 前
+            # 需要从原权重恢复完整检测头，避免后续前向计算缺少检测层。
+            if not self._reload_native_model():
+                head = self._native_detection_head(self._model)
+                if head is not None:
+                    try:
+                        head.end2end = True
+                    except (AttributeError, RuntimeError, TypeError):
+                        pass
+                self._sync_active_predictor_mode(True)
+                self._inference_mode = INFERENCE_MODE_ONE_TO_ONE
+                return self._inference_mode
+            head = self._native_detection_head(self._model)
+            if head is None:
+                self._inference_mode = INFERENCE_MODE_ONE_TO_ONE
+                return self._inference_mode
+            supports_one_to_one = self._supports_one_to_one(head)
+        if (
+            self._requested_inference_mode == INFERENCE_MODE_ONE_TO_ONE
+            and supports_one_to_one
+        ):
             try:
                 head.end2end = True
                 if bool(getattr(head, 'end2end', False)):
+                    self._sync_active_predictor_mode(True)
                     self._inference_mode = INFERENCE_MODE_ONE_TO_ONE
                     return self._inference_mode
             except (AttributeError, RuntimeError, TypeError):
                 pass
 
         # 普通检测头由 Ultralytics 的预测器执行 one-to-many 后处理和 NMS。
+        try:
+            head.end2end = False
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        self._sync_active_predictor_mode(False)
         self._inference_mode = INFERENCE_MODE_ONE_TO_MANY_NMS
         return self._inference_mode
+
+    def set_inference_mode(self, mode: str) -> str:
+        """设置后续预标注使用的检测分支，并返回当前实际生效模式。"""
+        if mode not in {
+            INFERENCE_MODE_ONE_TO_ONE,
+            INFERENCE_MODE_ONE_TO_MANY_NMS,
+        }:
+            mode = DEFAULT_INFERENCE_MODE
+        self._requested_inference_mode = mode
+
+        # 推理线程运行期间不修改模型检测头，避免影响当前任务；新选择会在
+        # 当前任务结束后、下一次预标注开始前自动应用。
+        if self._model is None or self._busy:
+            return self._inference_mode
+        return self._configure_inference_mode()
     
     def load_weights(self, path: str) -> bool:
         """Load YOLO model weights (.pt / .onnx / .engine / .trt)."""
@@ -107,6 +217,7 @@ class PreAnnotator:
             from ultralytics import YOLO
             self._model = YOLO(path)
             self._model_path = path
+            self._prepare_native_model_for_branch_switching()
             self._configure_inference_mode()
             return True
         except Exception as e:
@@ -120,7 +231,7 @@ class PreAnnotator:
                 print('ONNX 推理需要安装: pip install onnxruntime')
             self._model = None
             self._model_path = None
-            self._inference_mode = INFERENCE_MODE_ONE_TO_MANY_NMS
+            self._inference_mode = DEFAULT_INFERENCE_MODE
             return False
     
     def predict(self, image_path: Path, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
@@ -128,6 +239,9 @@ class PreAnnotator:
         """Run prediction on a single image (blocking — prefer predict_async in UI)."""
         if not self._model:
             return []
+
+        if not self._busy:
+            self._configure_inference_mode()
         
         try:
             results = self._model(image_path, conf=threshold, verbose=False)
@@ -179,6 +293,8 @@ class PreAnnotator:
         main_thread_schedule: Callable[[Callable], None] = None,
     ):
         """Run single-image prediction in a background thread."""
+        if self._model:
+            self._configure_inference_mode()
         self._cancel_event.clear()
         self._busy = True
         
@@ -216,6 +332,8 @@ class PreAnnotator:
         root=None,
     ) -> threading.Event:
         """Run batch prediction in a background thread."""
+        if self._model:
+            self._configure_inference_mode()
         self._cancel_event.clear()
         self._busy = True
         results: Dict[str, List[BBox]] = {}

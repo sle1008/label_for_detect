@@ -23,7 +23,13 @@ from io_ops.label_file_parser import load_annotation_file
 from io_ops.yolo_exporter import export_yolo
 from io_ops.coco_exporter import export_coco
 from io_ops.voc_exporter import export_voc
-from io_ops.pre_annotator import PreAnnotator
+from io_ops.pre_annotator import (
+    PreAnnotator,
+    DEFAULT_INFERENCE_MODE,
+    INFERENCE_MODE_BACKEND_AUTO,
+    INFERENCE_MODE_ONE_TO_ONE,
+    INFERENCE_MODE_ONE_TO_MANY_NMS,
+)
 from ui.canvas_panel import (
     AnnotationCanvas, CanvasMode,
     LABEL_MODE_CYCLE, LABEL_MODE_NAMES,
@@ -490,6 +496,24 @@ class AnnotationApp(tk.Tk):
         ann_menu = tk.Menu(menubar, tearoff=0)
         ann_menu.add_command(label='预标注当前图', command=self._pre_annotate_current, accelerator='Ctrl+X')
         ann_menu.add_command(label='批量预标注', command=self._batch_pre_annotate, accelerator='Ctrl+Shift+X')
+        ann_menu.add_separator()
+        self._inference_mode_var = tk.StringVar(value=DEFAULT_INFERENCE_MODE)
+        ann_menu.add_radiobutton(
+            label=INFERENCE_MODE_ONE_TO_ONE,
+            variable=self._inference_mode_var,
+            value=INFERENCE_MODE_ONE_TO_ONE,
+            command=lambda: self._set_pre_annotation_inference_mode(
+                INFERENCE_MODE_ONE_TO_ONE
+            ),
+        )
+        ann_menu.add_radiobutton(
+            label=INFERENCE_MODE_ONE_TO_MANY_NMS,
+            variable=self._inference_mode_var,
+            value=INFERENCE_MODE_ONE_TO_MANY_NMS,
+            command=lambda: self._set_pre_annotation_inference_mode(
+                INFERENCE_MODE_ONE_TO_MANY_NMS
+            ),
+        )
         ann_menu.add_separator()
         ann_menu.add_command(label='加载已有标注', command=self._load_existing_annotations)
         menubar.add_cascade(label='标注', menu=ann_menu)
@@ -3132,6 +3156,35 @@ class AnnotationApp(tk.Tk):
             self._toast_win = None
     
     # --- Pre-annotation ---
+
+    def _set_pre_annotation_inference_mode(self, mode: str):
+        """应用菜单选择的预标注检测分支，后续单张和批量任务共用。"""
+        effective_mode = self._pre_annotator.set_inference_mode(mode)
+        if (
+            mode == INFERENCE_MODE_ONE_TO_ONE
+            and self._pre_annotator.is_loaded
+            and not self._pre_annotator.is_busy
+            and effective_mode == INFERENCE_MODE_ONE_TO_MANY_NMS
+        ):
+            self._status_bar.warning(
+                '当前权重不支持 one-to-one，已回落到 one-to-many+NMS'
+            )
+        elif (
+            self._pre_annotator.is_loaded
+            and effective_mode == INFERENCE_MODE_BACKEND_AUTO
+        ):
+            self._status_bar.warning(
+                '当前导出权重的检测分支已固化，将按权重内置模式推理'
+            )
+        elif (
+            mode == INFERENCE_MODE_ONE_TO_MANY_NMS
+            and self._pre_annotator.is_loaded
+            and not self._pre_annotator.is_busy
+            and effective_mode == INFERENCE_MODE_ONE_TO_ONE
+        ):
+            self._status_bar.warning(
+                '当前权重不包含 one-to-many 分支，将继续使用 one-to-one'
+            )
     
     def _pre_annotate_current(self):
         """Run pre-annotation on current image (background thread)."""
