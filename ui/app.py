@@ -74,7 +74,19 @@ from utils.constants import (
 )
 
 
+# ==================== 界面参数设置区 ====================
+# 右键菜单保留的最近标签数量，使用会话内状态，不写入配置文件。
+RECENT_LABEL_LIMIT = 3
 LABEL_FILTER_ITEMS_PER_COLUMN = 40
+
+
+def update_recent_class_ids(recent_class_ids: List[int], class_id: int,
+                            limit: int = RECENT_LABEL_LIMIT) -> List[int]:
+    """按新标签入队规则更新最近标签，重复使用已有标签不改变顺序。"""
+    recent = list(recent_class_ids or [])[:max(0, limit)]
+    if class_id in recent or limit <= 0:
+        return recent
+    return [class_id] + recent[:limit - 1]
 
 
 class AnnotationApp(tk.Tk):
@@ -113,6 +125,7 @@ class AnnotationApp(tk.Tk):
         self._filter_status_snapshot = {}
         self._pending_refresh = None
         self._image_export_running = False
+        self._recent_class_ids: List[int] = []
         self._label_cache_ready_generation = -1
         self._label_cache_job_generation = 0
         self._label_cache_jobs = set()
@@ -560,7 +573,59 @@ class AnnotationApp(tk.Tk):
         menu.add_command(label='删除', command=self._delete_selected)
         menu.add_separator()
         menu.add_command(label='修改标签', command=self._focus_label_search)
+        self._canvas_context_menu = menu
+        self._recent_label_menu_start = menu.index('end') + 1
         self._canvas.set_context_menu(menu)
+
+    def _refresh_recent_label_menu(self):
+        """Refresh recent-label commands while preserving the base menu items."""
+        menu = getattr(self, '_canvas_context_menu', None)
+        if menu is None:
+            return
+
+        start = getattr(self, '_recent_label_menu_start', None)
+        if start is None:
+            return
+        end = menu.index('end')
+        if end is not None and end >= start:
+            menu.delete(start, 'end')
+
+        recent_ids = [
+            class_id for class_id in self._recent_class_ids
+            if self._label_manager.has_class(class_id)
+        ]
+        if not recent_ids:
+            return
+
+        menu.add_separator()
+        menu.add_command(label='最近使用标签', state='disabled')
+        for class_id in recent_ids:
+            label = self._label_manager.get_name(class_id)
+            menu.add_command(
+                label=f'[{class_id}] {label}',
+                command=lambda cid=class_id: self._apply_recent_class(cid),
+            )
+
+    def _remember_recent_class(self, class_id: int):
+        """Record a newly used label and update the canvas context menu."""
+        if not self._label_manager.has_class(class_id):
+            return
+        updated = update_recent_class_ids(
+            self._recent_class_ids, class_id, RECENT_LABEL_LIMIT,
+        )
+        if updated == self._recent_class_ids:
+            return
+        self._recent_class_ids = updated
+        self._refresh_recent_label_menu()
+
+    def _apply_recent_class(self, class_id: int):
+        """Apply a recent label through the normal label-change workflow."""
+        if not self._label_manager.has_class(class_id):
+            self._refresh_recent_label_menu()
+            return
+        self._label_manager.current_class_id = class_id
+        self._label_panel.highlight_class(class_id)
+        self._on_class_selected(class_id)
     
     def _call_in_main(self, fn):
         """Schedule callback on the Tk main thread (safe from worker threads)."""
@@ -2855,6 +2920,8 @@ class AnnotationApp(tk.Tk):
         selected = item.get_selected_annotations()
         if not selected:
             return
+
+        self._remember_recent_class(class_id)
         
         class_name = self._label_manager.get_name(class_id)
         snapshots = []

@@ -176,6 +176,28 @@ class GeometryTests(unittest.TestCase):
         self.assertLessEqual(bbox.y2, 184)
 
 
+class RecentLabelTests(unittest.TestCase):
+    def test_new_label_is_added_to_front_and_oldest_is_evicted(self):
+        from ui.app import update_recent_class_ids
+
+        recent = [3, 2, 1]
+
+        self.assertEqual(update_recent_class_ids(recent, 4), [4, 3, 2])
+
+    def test_reusing_recent_label_does_not_reorder_queue(self):
+        from ui.app import update_recent_class_ids
+
+        recent = [3, 2, 1]
+
+        self.assertEqual(update_recent_class_ids(recent, 2), recent)
+
+    def test_queue_keeps_at_most_three_labels(self):
+        from ui.app import update_recent_class_ids
+
+        self.assertEqual(update_recent_class_ids([], 7), [7])
+        self.assertEqual(update_recent_class_ids([3, 2, 1, 0], 3), [3, 2, 1])
+
+
 class AnnotationFileTests(unittest.TestCase):
     def test_load_yolo_annotation(self):
         with tempfile.TemporaryDirectory() as tmp:
