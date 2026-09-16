@@ -76,7 +76,7 @@ from utils.constants import (
 
 # ==================== 界面参数设置区 ====================
 # 右键菜单保留的最近标签数量，使用会话内状态，不写入配置文件。
-RECENT_LABEL_LIMIT = 3
+RECENT_LABEL_LIMIT = 4
 LABEL_FILTER_ITEMS_PER_COLUMN = 40
 
 
