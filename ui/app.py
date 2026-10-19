@@ -22,6 +22,7 @@ from core.undo_redo import UndoRedoManager, Command, CompoundCommand
 from core.config import AppConfig, ConfigManager
 from io_ops.image_loader import AsyncImageLoader
 from io_ops.label_file_parser import load_annotation_file
+from io_ops.label_set_detector import iter_label_set_candidates, read_label_set_txt
 from io_ops.yolo_exporter import export_yolo
 from io_ops.coco_exporter import export_coco
 from io_ops.voc_exporter import export_voc
@@ -2035,18 +2036,18 @@ class AnnotationApp(tk.Tk):
             self._config.last_directory = str(self._project.image_dir)
     
     def _try_auto_folder_labels(self, dir_path: str):
-        """Restore a manual label source or auto-import labels on directory open.
-
-        Priority:
-          1) The external label file manually selected for this directory.
-          2) An existing ``classes.txt`` in the opened root directory.
-          3) Otherwise, class-per-subfolder name detection.
-        """
+        """优先恢复目录手动选择，否则识别本地标签集并回退历史 TXT。"""
         if self._try_import_remembered_label_file(dir_path):
             return
         if self._try_import_root_classes_file(dir_path):
             return
-
+        last_path = Path(self._config.last_label_file) if self._config.last_label_file else None
+        if last_path and last_path.suffix.lower() == '.txt':
+            definitions = read_label_set_txt(last_path)
+            if definitions:
+                self._apply_detected_label_set(last_path, definitions)
+                return
+        # 无可用文件时，保留按子文件夹名导入的原有能力。
         detection = detect_class_folder_layout(Path(dir_path))
         if not detection.detected:
             return
@@ -2085,36 +2086,23 @@ class AnnotationApp(tk.Tk):
         return True
     
     def _try_import_root_classes_file(self, dir_path: str) -> bool:
-        """Import a classes.txt found directly in the opened root directory.
+        """自动识别当前图片目录直属 TXT 中的类别定义文件。"""
+        for label_path, definitions in iter_label_set_candidates(Path(dir_path)):
+            self._apply_detected_label_set(label_path, definitions)
+            return True
+        return False
 
-        Returns True when labels were successfully imported from the file.
-        """
-        classes_file = Path(dir_path) / 'classes.txt'
-        if not classes_file.is_file():
-            return False
-
-        backup = self._label_manager.to_dict_list()
+    def _apply_detected_label_set(self, label_path: Path, definitions: list):
+        """将已完整校验的标签集应用到界面及会话状态，不改写源文件。"""
         self._label_manager.clear()
-        try:
-            count = self._label_manager.load_from_txt(str(classes_file))
-        except Exception as e:
-            print(f'Failed to auto-load classes.txt: {e}')
-            count = 0
-
-        if count <= 0:
-            # Invalid/empty file: restore previous labels and fall back.
-            self._label_manager.clear()
-            self._label_manager.from_dict_list(backup)
-            return False
-
+        self._label_manager.from_dict_list(definitions)
         self._label_panel.refresh()
         self._refresh_label_filter_options()
-        self._config.last_label_file = str(classes_file)
+        self._config.last_label_file = str(label_path)
         item = self._project.current_image
         if item:
             self._apply_folder_default_class(item)
-        self._status_bar.success(f'已从 classes.txt 导入 {count} 个标签')
-        return True
+        self._status_bar.success(f'已从 {label_path.name} 导入 {len(definitions)} 个标签')
 
     def _apply_folder_labels(self, names: list, dir_path: str, manual_choice: bool = False):
         """Load labels from folder names and write classes.txt beside images."""
