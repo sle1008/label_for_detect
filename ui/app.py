@@ -22,7 +22,7 @@ from core.undo_redo import UndoRedoManager, Command, CompoundCommand
 from core.config import AppConfig, ConfigManager
 from io_ops.image_loader import AsyncImageLoader
 from io_ops.label_file_parser import load_annotation_file
-from io_ops.label_set_detector import iter_label_set_candidates, read_label_set_txt
+from io_ops.label_set_detector import iter_label_set_candidates
 from io_ops.yolo_exporter import export_yolo
 from io_ops.coco_exporter import export_coco
 from io_ops.voc_exporter import export_voc
@@ -1372,11 +1372,7 @@ class AnnotationApp(tk.Tk):
         self._label_manager.sort_by_name = self._config.label_sort_by_name
         self._label_panel.set_sort_by_name(self._config.label_sort_by_name)
         
-        # Restore labels
-        if self._config.label_definitions:
-            self._label_manager.from_dict_list(self._config.label_definitions)
-            self._label_panel.refresh()
-            self._refresh_label_filter_options()
+        # 类别定义由当前目录识别或手动导入，启动时不恢复历史类别以免误用。
         
         # Ask before restoring the last directory. A command-line directory or
         # another early opener takes precedence and suppresses this prompt.
@@ -1818,6 +1814,9 @@ class AnnotationApp(tk.Tk):
         self._project.image_list.clear()
         self._project.current_index = -1
         self._thumb_panel.clear()
+        if not from_refresh:
+            # 预读图片标注前确定本目录类别，避免后台扫描沿用旧目录的类别名称。
+            self._try_auto_folder_labels(dir_path)
         
         pending_refresh = self._pending_refresh if from_refresh else None
 
@@ -1981,7 +1980,6 @@ class AnnotationApp(tk.Tk):
                     self._status_bar.warning(
                         f'列表刷新完成: 当前筛选下没有匹配图片 (0/{count})'
                     )
-                self._try_auto_folder_labels(dir_path)
                 self.after_idle(self._start_pending_weights_load)
                 return
             else:
@@ -2001,7 +1999,6 @@ class AnnotationApp(tk.Tk):
             self._refresh_image_list_view(jump='keep', navigate=False)
             self._show_current_image_async()
             self.after(300, lambda: self._preload_window_async(self._project.current_index))
-            self._try_auto_folder_labels(dir_path)
         else:
             self._status_bar.warning(f'目录中未找到图片: {dir_path}')
             showwarning(self, '提示', '目录中未找到支持的图片文件')
@@ -2036,54 +2033,15 @@ class AnnotationApp(tk.Tk):
             self._config.last_directory = str(self._project.image_dir)
     
     def _try_auto_folder_labels(self, dir_path: str):
-        """优先恢复目录手动选择，否则识别本地标签集并回退历史 TXT。"""
-        if self._try_import_remembered_label_file(dir_path):
-            return
+        """每次打开目录仅识别本地标签集，未匹配时保留空类别供手动选择。"""
+        self._label_manager.clear()
+        self._config.last_label_file = ''
+        self._config.label_definitions = []
         if self._try_import_root_classes_file(dir_path):
             return
-        last_path = Path(self._config.last_label_file) if self._config.last_label_file else None
-        if last_path and last_path.suffix.lower() == '.txt':
-            definitions = read_label_set_txt(last_path)
-            if definitions:
-                self._apply_detected_label_set(last_path, definitions)
-                return
-        # 无可用文件时，保留按子文件夹名导入的原有能力。
-        detection = detect_class_folder_layout(Path(dir_path))
-        if not detection.detected:
-            return
-        
-        if detection.confidence == 'high':
-            self._apply_folder_labels(detection.class_names, dir_path)
-            return
-        
-        if detection.confidence == 'medium':
-            msg = (
-                f'检测到 {len(detection.class_names)} 个子文件夹可能为类别名。\n'
-                f'{detection.reason}\n\n{detection.tree_summary}\n\n'
-                '是否从子文件夹名导入标签？'
-            )
-            if askyesno(self, '导入标签', msg):
-                self._apply_folder_labels(detection.class_names, dir_path)
-
-    def _try_import_remembered_label_file(self, dir_path: str) -> bool:
-        """Restore a directory's manual label file and suppress auto-detection."""
-        label_path = self._config.directory_label_file(dir_path)
-        if not label_path:
-            return False
-
-        count, error = self._replace_labels_from_file(label_path)
-        if count <= 0:
-            message = (
-                f'该目录上次使用的标签文件当前无法加载：\n{label_path}\n\n'
-                f'{error}\n\n为避免使用错误标签，本次不会按目录名自动识别。'
-            )
-            self._status_bar.warning('已跳过目录标签自动识别，请重新加载标签文件')
-            showwarning(self, '标签文件不可用', message)
-            return True
-
-        self._config.last_label_file = label_path
-        self._status_bar.success(f'已恢复上次手动标签文件，共 {count} 个标签')
-        return True
+        self._label_panel.refresh()
+        self._refresh_label_filter_options()
+        self._status_bar.warning('未找到本目录的标签集，请手动加载标签')
     
     def _try_import_root_classes_file(self, dir_path: str) -> bool:
         """自动识别当前图片目录直属 TXT 中的类别定义文件。"""
@@ -2099,6 +2057,7 @@ class AnnotationApp(tk.Tk):
         self._label_panel.refresh()
         self._refresh_label_filter_options()
         self._config.last_label_file = str(label_path)
+        self._config.label_definitions = self._label_manager.to_dict_list()
         item = self._project.current_image
         if item:
             self._apply_folder_default_class(item)
@@ -2192,9 +2151,9 @@ class AnnotationApp(tk.Tk):
     
     def _load_label_file_from_disk(self):
         """Load label definitions from a txt/yaml file."""
-        # 文件选择优先定位到当前图片目录的上一级，未打开图片目录时沿用历史位置。
+        # 文件选择优先定位到当前图片目录，未打开图片目录时沿用历史位置。
         initial_dir = (
-            str(self._project.image_dir.resolve().parent)
+            str(self._project.image_dir.resolve())
             if self._project.image_dir
             else self._last_label_file_directory()
         )
@@ -2223,8 +2182,6 @@ class AnnotationApp(tk.Tk):
             return
 
         self._config.last_label_file = path
-        if self._project.image_dir:
-            self._config.remember_directory_label_file(str(self._project.image_dir), path)
         self._config.label_definitions = self._label_manager.to_dict_list()
         self._config_manager.save(self._config)
         source = 'YAML' if ext in ('.yaml', '.yml') else 'TXT'

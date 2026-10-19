@@ -8,21 +8,29 @@ from typing import Iterator, Optional
 # ==================== 标签集识别参数设置区 ====================
 LABEL_NAME_KEYWORD = 'class'
 PREFERRED_LABEL_STEMS = ('classes', 'class')
-CONTENT_MIN_LABELS = 2
+CONTENT_MIN_LABELS = 1
+COORDINATE_MIN_VALUES = 4
 DEFAULT_LABEL_THRESHOLD = 0.5
 INDEXED_LABEL_PATTERN = re.compile(r'^(\d+)\s*:\s*(.+)$')
-NUMERIC_SEPARATOR_PATTERN = re.compile(r'[\s,;]+')
+NUMERIC_SEPARATOR_PATTERN = re.compile(r'[\s,;\[\](){}]+')
 
 
-def _is_numeric_record(text: str) -> bool:
-    """纯数值记录不作为类别名，包括检测框、分割点及坐标列表。"""
-    tokens = NUMERIC_SEPARATOR_PATTERN.split(text.strip())
-    try:
-        for token in tokens:
+def _is_annotation_record(text: str) -> bool:
+    """排除纯数值及类别名后附带连续坐标的记录，保留普通多词类别名。"""
+    tokens = [token for token in NUMERIC_SEPARATOR_PATTERN.split(text.strip()) if token]
+    numeric_count = 0
+    consecutive = 0
+    for token in tokens:
+        try:
             float(token)
-        return bool(tokens)
-    except ValueError:
-        return False
+        except ValueError:
+            consecutive = 0
+        else:
+            numeric_count += 1
+            consecutive += 1
+            if consecutive >= COORDINATE_MIN_VALUES:
+                return True
+    return bool(tokens) and numeric_count == len(tokens)
 
 
 def read_label_set_txt(path: Path, require_indexed: bool = False,
@@ -48,7 +56,7 @@ def read_label_set_txt(path: Path, require_indexed: bool = False,
                 text = match.group(2) if indexed else line
                 parts = text.split('|')
                 name = parts[0].strip()
-                if not name or _is_numeric_record(name) or class_id in seen_ids:
+                if not name or _is_annotation_record(name) or class_id in seen_ids:
                     return None
                 if len(parts) > 2:
                     return None

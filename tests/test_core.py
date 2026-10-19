@@ -1668,18 +1668,20 @@ names:
 
             self.assertEqual(config.directory_label_file(str(root)), '')
 
-    def test_remembered_label_file_suppresses_all_auto_detection(self):
+    def test_directory_open_uses_local_detection_without_manual_history(self):
         from ui.app import AnnotationApp
 
         calls = []
         app = SimpleNamespace(
+            _label_manager=LabelManager(),
+            _config=AppConfig(),
             _try_import_remembered_label_file=lambda path: calls.append('manual') or True,
             _try_import_root_classes_file=lambda path: calls.append('classes') or True,
         )
 
         AnnotationApp._try_auto_folder_labels(app, 'images')
 
-        self.assertEqual(calls, ['manual'])
+        self.assertEqual(calls, ['classes'])
 
     def test_manual_label_file_replaces_auto_detected_labels(self):
         from ui.app import AnnotationApp
