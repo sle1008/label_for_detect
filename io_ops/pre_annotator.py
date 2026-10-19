@@ -249,6 +249,26 @@ class PreAnnotator:
         except Exception as e:
             print(f"Prediction error for {image_path}: {e}")
             return []
+
+    def predict_frame(self, frame, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+                      label_manager: LabelManager = None) -> List[BBox]:
+        """使用当前模型推理单个内存视频帧。"""
+        if not self._model:
+            return []
+        try:
+            frame_rgb = frame
+            if getattr(frame, 'ndim', 0) == 3 and frame.shape[2] >= 3:
+                frame_rgb = frame[:, :, ::-1]
+            if not self._busy:
+                self._configure_inference_mode()
+            predict_options = {'conf': threshold, 'verbose': False}
+            if self._inference_mode == INFERENCE_MODE_ONE_TO_ONE:
+                predict_options['end2end'] = True
+            results = self._model(frame_rgb, **predict_options)
+            return self._results_to_bboxes(results, label_manager)
+        except Exception as exc:
+            print(f'Video frame prediction error: {exc}')
+            return []
     
     def _results_to_bboxes(self, results, label_manager: LabelManager = None) -> List[BBox]:
         annotations = []

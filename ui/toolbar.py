@@ -59,6 +59,7 @@ class Toolbar(tk.Frame):
 
     def _setup_ui(self):
         self._make_button("\U0001f504 刷新列表", "refresh_list", bg="#4a90d9", fg="white")
+        self._make_button("\U0001f3a5 打开视频", "open_video", bg="#596b7a", fg="white")
         self._make_button("\U0001f4be 保存", "save", bg="#5cb85c", fg="white")
         self._make_button("\U0001f3f7 加载标签", "load_labels", bg="#7b68ae", fg="white")
 

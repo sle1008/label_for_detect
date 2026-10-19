@@ -67,6 +67,9 @@ class AnnotationCanvas(tk.Canvas):
         self._mode = CanvasMode.IDLE
         self._current_image: Optional[ImageItem] = None
         self._source_pil_image: Optional[Image.Image] = None
+        self._video_frame_photo: Optional[ImageTk.PhotoImage] = None
+        self._video_annotations: List[BBox] = []
+        self._video_mode = False
         self._photo_image: Optional[ImageTk.PhotoImage] = None
         self._label_manager: Optional[LabelManager] = None
         
@@ -179,9 +182,11 @@ class AnnotationCanvas(tk.Canvas):
 
     def set_image(self, image_item: ImageItem, pil_image: Image.Image = None):
         """Set the current image to display."""
+        self._video_mode = False
         self._current_image = image_item
         self._bbox_items.clear()
         self._hover_bbox_id = None
+        self._video_annotations = []
         
         if pil_image is None and image_item._pil_image is not None:
             pil_image = image_item._pil_image
@@ -195,6 +200,56 @@ class AnnotationCanvas(tk.Canvas):
         # Reference only — avoid copying multi-megapixel images
         self._source_pil_image = pil_image
         self.fit_to_window()
+
+    def show_video_frame(self, frame: Image.Image, annotations: List[BBox] = None):
+        """显示视频帧和检测框，不接入静态图片的编辑状态。"""
+        self._current_image = None
+        self._video_mode = True
+        self._bbox_items.clear()
+        self._hover_bbox_id = None
+        self._source_pil_image = frame
+        self._video_annotations = annotations or []
+        canvas_w = max(1, self.winfo_width())
+        canvas_h = max(1, self.winfo_height())
+        frame_w, frame_h = frame.size
+        self._scale = min(canvas_w / frame_w, canvas_h / frame_h)
+        self._offset_x = (canvas_w - frame_w * self._scale) / 2
+        self._offset_y = (canvas_h - frame_h * self._scale) / 2
+        self._redraw_video_frame()
+
+    def _redraw_video_frame(self):
+        """绘制当前视频帧及其推理结果。"""
+        frame = self._source_pil_image
+        if frame is None or not self._video_mode:
+            return
+        self.delete('all')
+        display_size = (
+            max(1, int(round(frame.width * self._scale))),
+            max(1, int(round(frame.height * self._scale))),
+        )
+        display = frame.resize(display_size, Image.BILINEAR)
+        self._video_frame_photo = ImageTk.PhotoImage(display)
+        self._image_id = self.create_image(
+            self._offset_x, self._offset_y, anchor='nw', image=self._video_frame_photo,
+        )
+        for bbox in self._video_annotations:
+            x1, y1 = self.image_to_canvas(bbox.x1, bbox.y1)
+            x2, y2 = self.image_to_canvas(bbox.x2, bbox.y2)
+            color = self._label_manager.get_color(bbox.class_id) if self._label_manager else '#00ff66'
+            self.create_rectangle(x1, y1, x2, y2, outline=color, width=3)
+            label = f'{bbox.class_name} {bbox.confidence:.2f}'
+            self.create_text(x1 + 3, y1 - 3, text=label, anchor='sw', fill='white',
+                             font=('Microsoft YaHei UI', 10),
+                             tags='video_annotation')
+            text_id = self.find_withtag('video_annotation')[-1]
+            text_box = self.bbox(text_id)
+            if text_box:
+                bg = self.create_rectangle(
+                    text_box[0] - 2, text_box[1] - 1,
+                    text_box[2] + 2, text_box[3] + 1,
+                    fill=color, outline=color,
+                )
+                self.tag_lower(bg, text_id)
     
     def fit_to_window(self):
         """Fit image to canvas window."""
@@ -274,8 +329,11 @@ class AnnotationCanvas(tk.Canvas):
         self.delete('all')
         self._bbox_items.clear()
         self._photo_image = None
+        self._video_frame_photo = None
         self._source_pil_image = None
         self._current_image = None
+        self._video_mode = False
+        self._video_annotations = []
     
     @property
     def mode(self) -> CanvasMode:
@@ -317,6 +375,12 @@ class AnnotationCanvas(tk.Canvas):
     
     def _redraw(self, high_quality: bool = True):
         """Redraw all canvas elements."""
+        if self._video_mode:
+            if self._redraw_after_id is not None:
+                self.after_cancel(self._redraw_after_id)
+                self._redraw_after_id = None
+            self._redraw_video_frame()
+            return
         if high_quality and self._redraw_after_id is not None:
             self.after_cancel(self._redraw_after_id)
             self._redraw_after_id = None
@@ -981,7 +1045,9 @@ class AnnotationCanvas(tk.Canvas):
     
     def _on_resize(self, event):
         """Handle canvas resize."""
-        if self._source_pil_image and self._scale <= 0:
+        if self._video_mode and self._source_pil_image:
+            self.show_video_frame(self._source_pil_image, self._video_annotations)
+        elif self._source_pil_image and self._scale <= 0:
             self.fit_to_window()
         elif self._source_pil_image:
             self._schedule_redraw(high_quality=True)

@@ -3,6 +3,8 @@
 import os
 import sys
 import queue
+import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog
 from pathlib import Path
@@ -40,6 +42,7 @@ from ui.label_panel import LabelPanel
 from ui.box_list_panel import BoxListPanel
 from ui.thumbnail_panel import ThumbnailPanel
 from ui.status_bar import StatusBar
+from ui.video_controls import VideoControls
 from ui.dialogs import (
     ExportDialog, StatisticsDialog, LabelLoadDialog, JumpToImageDialog,
     RestoreDirectoryDialog, ImageExportModeDialog, ImageExportConflictDialog,
@@ -78,6 +81,10 @@ from utils.constants import (
 # 右键菜单保留的最近标签数量，使用会话内状态，不写入配置文件。
 RECENT_LABEL_LIMIT = 4
 LABEL_FILTER_ITEMS_PER_COLUMN = 40
+VIDEO_FRAME_POLL_MS = 15
+VIDEO_INFERENCE_MAX_FPS = 30
+VIDEO_FILETYPES = [('视频文件', '*.mp4 *.avi *.mov *.mkv *.wmv *.m4v'), ('所有文件', '*.*')]
+VIDEO_SUPPORTED_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
 
 
 def update_recent_class_ids(recent_class_ids: List[int], class_id: int,
@@ -137,6 +144,22 @@ class AnnotationApp(tk.Tk):
         self._label_filter_var = tk.StringVar(value='全部标签')
         self._label_filter_display_to_id = {'全部标签': None}
         self._label_filter_popup = None
+        self._video_capture = None
+        self._video_path = ''
+        self._pending_video_generation = None
+        self._video_open_stop_event = None
+        self._video_duration = 0.0
+        self._video_fps = 0.0
+        self._video_frame_index = 0
+        self._video_playing = False
+        self._video_generation = 0
+        self._video_stop_event = None
+        # 视频控制事件在打开视频后创建，空闲状态下保留空值供统一清理流程使用。
+        self._video_pause_event = None
+        self._video_seek_request = None
+        self._video_state_lock = threading.Lock()
+        self._video_result_queue = queue.Queue(maxsize=1)
+        self._video_poll_after_id = None
         
         # Apply saved geometry
         if self._config.window_geometry:
@@ -207,6 +230,7 @@ class AnnotationApp(tk.Tk):
                 'batch_pre_annotate': self._batch_pre_annotate,
                 'stop_batch_pre_annotate': self._stop_batch_pre_annotate,
                 'export': self._export,
+                'open_video': self._open_video,
             }
         )
         self._toolbar.pack(fill='x', side='top', padx=6, pady=(4, 2))
@@ -244,9 +268,10 @@ class AnnotationApp(tk.Tk):
             width=left_w, stretch='never',
         )
         
-        # Center: Canvas
+        # Center: shared canvas for images and video frames.
+        self._center_wrap = ttk.Frame(self._paned)
         self._canvas = AnnotationCanvas(
-            self._paned,
+            self._center_wrap,
             on_annotation_changed=self._on_annotation_changed,
             on_mode_changed=self._on_mode_changed,
             on_new_bbox=self._on_new_bbox,
@@ -256,7 +281,15 @@ class AnnotationApp(tk.Tk):
         self._canvas.set_label_manager(self._label_manager)
         self._setup_canvas_context_menu()
         self._canvas.set_image_context_menu_handler(self._on_canvas_image_context_menu)
-        self._paned.add(self._canvas, minsize=400, stretch='always')
+        self._canvas.pack(fill='both', expand=True)
+        self._video_controls = VideoControls(
+            self._center_wrap,
+            on_toggle_play=self._toggle_video_play,
+            on_seek=self._seek_video,
+        )
+        self._video_controls.pack(fill='x', side='bottom')
+        self._video_controls.pack_forget()
+        self._paned.add(self._center_wrap, minsize=400, stretch='always')
         
         right_w = self._saved_right_panel_width()
         self._right_wrap = tk.Frame(self._paned, width=right_w, bg=UI_BG_COLOR)
@@ -452,6 +485,7 @@ class AnnotationApp(tk.Tk):
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label='打开目录...', command=self._open_directory, accelerator='Ctrl+O')
+        file_menu.add_command(label='打开视频...', command=self._open_video, accelerator='Ctrl+Shift+O')
         file_menu.add_command(label='刷新列表', command=self._refresh_list)
         file_menu.add_command(label='加载标签...', command=self._load_label_file)
         file_menu.add_command(label='加载预标注权重...', command=self._load_weights)
@@ -660,6 +694,9 @@ class AnnotationApp(tk.Tk):
         )
 
     def _show_image_context_menu(self, event, full_index: int = None, selected_indices=None):
+        if self._video_path:
+            self._status_bar.info('视频播放期间不可修改图片列表')
+            return
         if full_index is None:
             full_index = self._project.current_index
         if not (0 <= full_index < len(self._project.image_list)):
@@ -1245,6 +1282,7 @@ class AnnotationApp(tk.Tk):
     def _setup_bindings(self):
         """Setup keyboard shortcuts."""
         self.bind('<Control-o>', lambda e: self._refresh_list())
+        self.bind('<Control-Shift-O>', lambda e: self._open_video())
         self.bind('<Control-s>', lambda e: self._save_current())
         self.bind('<Control-S>', lambda e: self._export())  # Ctrl+Shift+S
         self.bind('<Control-z>', lambda e: self._undo())
@@ -1707,6 +1745,8 @@ class AnnotationApp(tk.Tk):
     
     def _open_directory(self):
         """Open image directory with filters reset for the new selection."""
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         initial = self._config.last_directory or os.path.expanduser('~')
         d = filedialog.askdirectory(initialdir=initial, title='选择图片目录', parent=self)
         if d:
@@ -1715,6 +1755,8 @@ class AnnotationApp(tk.Tk):
 
     def _refresh_list(self):
         """Rescan disk and rebuild the list using the active filters."""
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         if not self._project.image_dir:
             showwarning(self, '提示', '请先打开一个目录')
             return
@@ -1738,6 +1780,8 @@ class AnnotationApp(tk.Tk):
 
     def _load_directory(self, dir_path: str, from_refresh: bool = False):
         """Load images from directory without blocking the UI."""
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         import threading
         
         self._status_bar.info(
@@ -2160,6 +2204,12 @@ class AnnotationApp(tk.Tk):
     
     def _load_label_file_from_disk(self):
         """Load label definitions from a txt/yaml file."""
+        # 文件选择优先定位到当前图片目录的上一级，未打开图片目录时沿用历史位置。
+        initial_dir = (
+            str(self._project.image_dir.resolve().parent)
+            if self._project.image_dir
+            else self._last_label_file_directory()
+        )
         filetypes = [
             ('标签文件', '*.txt *.yaml *.yml'),
             ('TXT文件', '*.txt'),
@@ -2169,7 +2219,7 @@ class AnnotationApp(tk.Tk):
         path = filedialog.askopenfilename(
             title='选择标签文件（TXT / YAML）',
             filetypes=filetypes,
-            initialdir=self._last_label_file_directory(),
+            initialdir=initial_dir,
             parent=self,
         )
         if not path:
@@ -2536,6 +2586,8 @@ class AnnotationApp(tk.Tk):
         return None
 
     def _prev_image(self):
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         current = self._project.current_image
         if current:
             if not self._save_before_navigate():
@@ -2546,6 +2598,8 @@ class AnnotationApp(tk.Tk):
             self._show_current_image_async()
     
     def _next_image(self):
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         current = self._project.current_image
         if current:
             if not self._save_before_navigate():
@@ -2556,6 +2610,8 @@ class AnnotationApp(tk.Tk):
             self._show_current_image_async()
     
     def _goto_first(self):
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         current = self._project.current_image
         if current:
             if not self._save_before_navigate():
@@ -2566,6 +2622,8 @@ class AnnotationApp(tk.Tk):
             self._show_current_image_async()
     
     def _goto_last(self):
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         current = self._project.current_image
         if current:
             if not self._save_before_navigate():
@@ -2577,6 +2635,8 @@ class AnnotationApp(tk.Tk):
 
     def _jump_to_image(self):
         """Jump to a 1-based index in the currently visible image list."""
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         indices = self._project.get_visible_indices()
         if not indices:
             showwarning(self, '提示', '当前没有可跳转的图片')
@@ -2599,6 +2659,8 @@ class AnnotationApp(tk.Tk):
     
     def _prev_bbox(self):
         """Select the previous annotation box."""
+        if self._video_path:
+            return
         item = self._project.current_image
         if not item or not item.annotations:
             return
@@ -2624,6 +2686,8 @@ class AnnotationApp(tk.Tk):
     
     def _next_bbox(self):
         """Select the next annotation box."""
+        if self._video_path:
+            return
         item = self._project.current_image
         if not item or not item.annotations:
             return
@@ -2648,11 +2712,297 @@ class AnnotationApp(tk.Tk):
         )
     
     def _on_thumb_selected(self, index: int):
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         if not self._save_before_navigate():
             self._thumb_panel.set_current_by_full_index(self._project.current_index)
             return
         if self._project.goto_image(index):
             self._show_current_image_async()
+
+    def _open_video(self):
+        """打开视频并使用当前已加载的预标注权重逐帧检测。"""
+        path = filedialog.askopenfilename(
+            title='选择视频文件', filetypes=VIDEO_FILETYPES, parent=self,
+        )
+        if not path:
+            return
+        if Path(path).suffix.lower() not in VIDEO_SUPPORTED_EXTENSIONS:
+            self._status_bar.warning('所选文件格式不是支持的视频格式')
+            return
+        if not self._pre_annotator.is_loaded:
+            self._status_bar.warning('请先加载预标注权重，再打开视频')
+            return
+        if self._pre_annotator.is_busy or self._weights_load_in_progress:
+            self._status_bar.warning('预标注任务正在运行，请稍后再播放视频')
+            return
+        if (self._video_path or self._pending_video_generation is not None) and self._project.current_image:
+            if not self._save_before_navigate():
+                return
+        if (not self._video_path and self._pending_video_generation is None
+                and self._project.current_image):
+            if not self._save_before_navigate():
+                return
+        self._stop_video(clear_canvas=False)
+        self._status_bar.set_info(f'正在打开视频: {Path(path).name}')
+        generation = self._video_generation
+        self._pending_video_generation = generation
+        open_stop_event = threading.Event()
+        self._video_open_stop_event = open_stop_event
+
+        def worker():
+            import cv2
+
+            capture = cv2.VideoCapture(path)
+            if open_stop_event.is_set():
+                capture.release()
+                return
+            if not capture.isOpened():
+                capture.release()
+                self._call_in_main(lambda: self._video_open_failed(generation, path))
+                return
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if fps <= 0:
+                fps = 25.0
+            duration = frame_count / fps if frame_count > 0 else 0.0
+            self._call_in_main(
+                lambda cap=capture, rate=fps, length=duration, count=frame_count:
+                self._video_opened(generation, path, cap, rate, length, count)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _video_open_failed(self, generation, path):
+        if generation != self._video_generation or self._pending_video_generation != generation:
+            return
+        self._pending_video_generation = None
+        showerror(self, '视频打开失败', f'无法打开视频文件：\n{path}')
+        self._status_bar.error(f'无法打开视频: {Path(path).name}')
+
+    def _video_opened(self, generation, path, capture, fps, duration, frame_count):
+        if generation != self._video_generation or self._pending_video_generation != generation:
+            capture.release()
+            return
+        self._pending_video_generation = None
+        self._video_open_stop_event = None
+        if self._video_stop_event is not None:
+            self._video_stop_event.set()
+        old_capture = self._video_capture
+        if old_capture is not None:
+            old_capture.release()
+        self._video_capture = capture
+        self._video_path = path
+        self._video_fps = fps
+        self._video_duration = duration
+        self._video_frame_index = 0
+        with self._video_state_lock:
+            self._video_playing = True
+        self._video_controls.pack(fill='x', side='bottom')
+        self._video_controls.set_duration(duration)
+        self._video_controls.set_enabled(True)
+        self._video_controls.set_playing(True)
+        self._video_stop_event = threading.Event()
+        with self._video_state_lock:
+            self._video_seek_request = None
+        self._video_pause_event = threading.Event()
+        self._video_pause_event.set()
+        while True:
+            try:
+                self._video_result_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._status_bar.set_info(f'视频播放中: {Path(path).name}')
+        self._start_video_worker(generation, capture, fps, frame_count, self._video_stop_event)
+        self._schedule_video_result_poll()
+
+    def _start_video_worker(self, generation, capture, fps, frame_count, stop_event):
+        """后台解码并推理，主线程仅负责显示最新完成帧。"""
+        interval = 1.0 / min(max(fps, 1.0), VIDEO_INFERENCE_MAX_FPS)
+        model = self._pre_annotator._model
+        label_manager = self._label_manager
+
+        def worker():
+            import cv2
+
+            while True:
+                if stop_event.is_set():
+                    break
+                started = time.perf_counter()
+                with self._video_state_lock:
+                    seek = self._video_seek_request
+                    if seek is not None:
+                        self._video_seek_request = None
+                        self._video_playing = True
+                        self._video_pause_event.set()
+                if seek is not None:
+                    self._call_in_main(lambda: self._set_video_play_button(True))
+                if seek is not None:
+                    target = max(0, int(seek * fps))
+                    if frame_count > 0:
+                        target = min(target, frame_count - 1)
+                    capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+                ok, frame = capture.read()
+                if not ok:
+                    self._call_in_main(lambda: self._video_reached_end(generation))
+                    break
+                frame_index = max(0, int(capture.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
+                height, width = frame.shape[:2]
+                try:
+                    results = model(
+                        frame[:, :, ::-1],
+                        conf=self._threshold,
+                        verbose=False,
+                        **({'end2end': True}
+                           if self._pre_annotator.inference_mode == INFERENCE_MODE_ONE_TO_ONE
+                           else {}),
+                    )
+                    annotations = self._pre_annotator._results_to_bboxes(
+                        results, label_manager,
+                    )
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    from PIL import Image
+                    image = Image.fromarray(frame_rgb)
+                except Exception as exc:
+                    print(f'Video frame processing error: {exc}')
+                    continue
+                position = frame_index / fps
+                with self._video_state_lock:
+                    current_seek = self._video_seek_request
+                if stop_event.is_set():
+                    break
+                if current_seek is not None:
+                    continue
+                result = (generation, image, annotations, frame_index, position, width, height)
+                try:
+                    self._video_result_queue.put_nowait(result)
+                except queue.Full:
+                    try:
+                        self._video_result_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._video_result_queue.put_nowait(result)
+                    except queue.Full:
+                        pass
+                with self._video_state_lock:
+                    is_playing = self._video_playing
+                if not is_playing:
+                    if stop_event.wait(0.02):
+                        break
+                else:
+                    self._video_pause_event.set()
+                    remaining = max(0.0, interval - (time.perf_counter() - started))
+                    if stop_event.wait(min(remaining, 0.05)):
+                        break
+                    if remaining > 0.05:
+                        stop_event.wait(remaining - 0.05)
+                if stop_event.is_set():
+                    break
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _schedule_video_result_poll(self):
+        if self._video_poll_after_id is None:
+            self._video_poll_after_id = self.after(VIDEO_FRAME_POLL_MS, self._poll_video_result)
+
+    def _set_video_play_button(self, playing):
+        """在主线程中同步视频播放按钮状态。"""
+        if self._video_path:
+            self._video_controls.set_playing(playing)
+
+    def _poll_video_result(self):
+        self._video_poll_after_id = None
+        try:
+            result = self._video_result_queue.get_nowait()
+        except queue.Empty:
+            result = None
+        if result is not None:
+            generation, frame, annotations, index, position, width, height = result
+            if generation == self._video_generation and self._video_path:
+                self._video_frame_index = index
+                self._canvas.show_video_frame(frame, annotations)
+                self._video_controls.set_position(position)
+                self._status_bar.set_overlay(
+                    f'视频: {Path(self._video_path).name} | {width}x{height} | '
+                    f'{self._video_controls._format_time(position)} / '
+                    f'{self._video_controls._format_time(self._video_duration)} | '
+                    f'检测框: {len(annotations)}'
+                )
+        if self._video_path:
+            self._schedule_video_result_poll()
+
+    def _toggle_video_play(self):
+        if not self._video_path or self._video_stop_event is None:
+            return
+        with self._video_state_lock:
+            self._video_playing = not self._video_playing
+            playing = self._video_playing
+            if playing and self._video_duration > 0:
+                frame_duration = 1.0 / max(self._video_fps, 1.0)
+                current_position = self._video_frame_index * frame_duration
+                if current_position >= self._video_duration - frame_duration:
+                    self._video_seek_request = 0.0
+        if playing:
+            self._video_pause_event.set()
+        else:
+            self._video_pause_event.clear()
+        self._video_controls.set_playing(playing)
+
+    def _seek_video(self, position):
+        if self._video_path and self._video_stop_event is not None:
+            with self._video_state_lock:
+                self._video_seek_request = max(0.0, min(position, self._video_duration))
+                self._video_playing = False
+            self._video_pause_event.clear()
+            return 'break'
+
+    def _video_reached_end(self, generation):
+        if generation == self._video_generation and self._video_path:
+            with self._video_state_lock:
+                self._video_playing = False
+            self._video_controls.set_playing(False)
+
+    def _stop_video(self, clear_canvas=True):
+        """停止后台解码并释放视频资源。"""
+        self._video_generation += 1
+        if self._video_stop_event is not None:
+            self._video_stop_event.set()
+        if self._video_pause_event is not None:
+            self._video_pause_event.set()
+        if self._video_open_stop_event is not None:
+            self._video_open_stop_event.set()
+            self._video_open_stop_event = None
+        self._pending_video_generation = None
+        capture = self._video_capture
+        self._video_capture = None
+        if capture is not None:
+            capture.release()
+        self._video_stop_event = None
+        self._video_pause_event = None
+        self._video_path = ''
+        with self._video_state_lock:
+            self._video_playing = False
+            self._video_seek_request = None
+        self._video_duration = 0.0
+        self._video_fps = 0.0
+        self._video_controls.set_playing(False)
+        self._video_controls.set_duration(0.0)
+        self._video_controls.pack_forget()
+        if self._video_poll_after_id is not None:
+            try:
+                self.after_cancel(self._video_poll_after_id)
+            except tk.TclError:
+                pass
+            self._video_poll_after_id = None
+        while True:
+            try:
+                self._video_result_queue.get_nowait()
+            except queue.Empty:
+                break
+        if clear_canvas:
+            self._canvas.clear_all()
+        self._update_window_title()
 
     def _remove_missing_image_item(self, missing_item: ImageItem) -> bool:
         """Remove an externally deleted image from project and visible-list state."""
@@ -2747,6 +3097,8 @@ class AnnotationApp(tk.Tk):
     
     def _display_current_image(self, on_displayed=None):
         """Actually display the loaded image on canvas (must be called on main thread)."""
+        if self._video_path or self._pending_video_generation is not None:
+            self._stop_video(clear_canvas=False)
         item = self._project.current_image
         if not item:
             if on_displayed:
@@ -2807,6 +3159,8 @@ class AnnotationApp(tk.Tk):
     
     def _on_annotation_changed(self):
         """Called when annotations are modified."""
+        if self._video_path:
+            return
         item = self._project.current_image
         if item:
             selected = item.get_selected_annotations()
@@ -2827,6 +3181,8 @@ class AnnotationApp(tk.Tk):
     
     def _on_new_bbox(self, bbox: BBox):
         """Handle new bbox drawn on canvas - with undo support."""
+        if self._video_path:
+            return
         item = self._project.current_image
         if not item:
             return
@@ -2860,6 +3216,8 @@ class AnnotationApp(tk.Tk):
     
     def _on_geometry_changed(self, description: str, changes: list):
         """Register undo for bbox move/resize (already applied on canvas)."""
+        if self._video_path:
+            return
         item = self._project.current_image
         if not item or not changes:
             return
@@ -2978,9 +3336,13 @@ class AnnotationApp(tk.Tk):
     def _on_threshold_changed(self, value: float):
         self._threshold = value
         self._config.confidence_threshold = value
+        if self._video_path:
+            self._seek_video(self._video_controls.get_position())
     
     def _quick_select_class(self, index: int):
         """Quick select class by number key (1-9)."""
+        if self._video_path:
+            return
         labels = self._label_manager.labels_for_display()
         if index < len(labels):
             self._label_manager.current_class_id = labels[index].class_id
@@ -2988,6 +3350,8 @@ class AnnotationApp(tk.Tk):
             self._on_class_selected(labels[index].class_id)
     
     def _select_all(self):
+        if self._video_path:
+            return
         item = self._project.current_image
         if item:
             item.select_all()
@@ -2995,6 +3359,8 @@ class AnnotationApp(tk.Tk):
             self._box_list_panel.refresh()
     
     def _inverse_select(self):
+        if self._video_path:
+            return
         item = self._project.current_image
         if item:
             item.inverse_selection()
@@ -3002,6 +3368,9 @@ class AnnotationApp(tk.Tk):
             self._box_list_panel.refresh()
     
     def _delete_selected(self):
+        if self._video_path:
+            self._status_bar.warning('视频播放期间不可删除图片列表项目')
+            return
         item = self._project.current_image
         if not item:
             return
@@ -3038,6 +3407,8 @@ class AnnotationApp(tk.Tk):
     # --- Undo/Redo ---
     
     def _undo(self):
+        if self._video_path:
+            return
         manager = self._current_image_undo_manager()
         desc = manager.undo() if manager.can_undo() else None
         if desc:
@@ -3059,6 +3430,8 @@ class AnnotationApp(tk.Tk):
         self._status_bar.set_info('没有可撤销内容')
     
     def _redo(self):
+        if self._video_path:
+            return
         manager = self._current_image_undo_manager()
         desc = manager.redo() if manager.can_redo() else None
         if desc:
@@ -3072,6 +3445,9 @@ class AnnotationApp(tk.Tk):
     # --- Save ---
     
     def _save_current(self):
+        if self._video_path:
+            self._status_bar.info('视频检测结果为预览内容，不保存为图片标注')
+            return
         """Save current annotations."""
         saved = self._save_current_annotations()
         if not saved:
@@ -3141,6 +3517,11 @@ class AnnotationApp(tk.Tk):
     # --- View ---
     
     def _fit_window(self):
+        if self._video_path and self._canvas._source_pil_image is not None:
+            self._canvas.show_video_frame(
+                self._canvas._source_pil_image, self._canvas._video_annotations,
+            )
+            return
         self._canvas.fit_to_window()
         self._on_zoom_changed(self._canvas._scale)
 
@@ -3425,6 +3806,9 @@ class AnnotationApp(tk.Tk):
     # --- Export ---
     
     def _export(self):
+        if self._video_path:
+            self._status_bar.warning('请先返回图片，再执行图片导出')
+            return
         """Export annotations."""
         if not self._project.has_images:
             showwarning(self, '提示', '没有可导出的数据')
@@ -3536,6 +3920,9 @@ Escape      取消绘制 / 取消选中
     
     def _on_close(self):
         """Handle window close."""
+        self._stop_video(clear_canvas=False)
+        if self._pending_video_generation is not None:
+            self._pending_video_generation = None
         self._cancel_pane_layout_apply()
         try:
             failed_item = self._save_all_dirty_annotations()
