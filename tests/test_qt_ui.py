@@ -1,5 +1,6 @@
 """Qt 界面真实事件回归，所有图片、视频和配置均在临时目录内创建。"""
 
+import gc
 import sys
 import tempfile
 import threading
@@ -11,7 +12,8 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
+from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
@@ -69,6 +71,11 @@ class QtWorkbenchTests(unittest.TestCase):
         self.runtime.processEvents()
         self.assertTrue(self.app._closing)
         self.assertEqual(self.app._callback_errors, [])
+        # 关闭窗口后显式销毁原生控件，避免多个测试窗口积累到解释器退出。
+        self.app.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app = None
+        gc.collect()
         self.temporary.cleanup()
 
     def load_images(self):
@@ -314,6 +321,58 @@ class QtWorkbenchTests(unittest.TestCase):
         self.wait(lambda: self.app._canvas._current_image is not original)
         self.assertTrue(preferred_annotation_txt_path(self.paths[0]).is_file())
 
+    def test_canvas_center_cursor_colors_size_and_mouse_modes(self):
+        self.load_images()
+        canvas = self.app._canvas
+
+        def move_pointer(point):
+            # 不依赖离屏测试窗口的系统鼠标位置，仍走原生 Qt 鼠标事件入口。
+            event = QMouseEvent(QEvent.Type.MouseMove, QPointF(point), QPointF(canvas.mapToGlobal(point)),
+                                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(canvas, event)
+
+        move_pointer(self.canvas_point(250, 150))
+        cursor = canvas.cursor()
+        self.assertEqual(cursor.shape(), Qt.CursorShape.BitmapCursor)
+        image = cursor.pixmap().toImage()
+        center = cursor.hotSpot()
+        self.assertEqual((image.width(), image.height()), (32, 32))
+        self.assertEqual(image.pixelColor(center.x() + 5, center.y()), QColor('#000000'))
+        self.assertEqual(image.pixelColor(center.x() + 5, center.y() - 1), QColor('#ffffff'))
+        self.assertEqual(image.pixelColor(center.x() + 5, center.y() - 2).alpha(), 0)
+        # 缩放图片不会改变光标位图；框体和手柄仍保留移动操作提示。
+        item = self.app._project.current_image
+        item.annotations = [BBox(20, 20, 80, 80, 0, 'deer', is_selected=True)]
+        move_pointer(self.canvas_point(50, 50))
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.SizeAllCursor)
+        move_pointer(QPoint(0, 0))
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
+        self.open_video()
+        move_pointer(QPoint(canvas.width() // 2, canvas.height() // 2))
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
+
+    def test_selected_box_black_white_outline_and_foreground_layer(self):
+        self.load_images()
+        item = self.app._project.current_image
+        selected = BBox(30, 30, 150, 130, 0, 'deer', is_selected=True)
+        other = BBox(30, 30, 150, 130, 1, 'person')
+        item.annotations = [selected, other]
+        canvas = self.app._canvas
+        canvas._pointer = None
+        # 重叠的未选中框不能盖住选中边线，原始实例顺序和坐标保持不变。
+        for background in ('#000000', '#ffffff', '#808080'):
+            canvas.set_image(item, Image.new('RGB', (320, 200), background))
+            image = canvas.grab().toImage()
+            ratio = image.devicePixelRatioF()
+            x, y = canvas.image_to_canvas(60, 30)
+            column, row = round(x * ratio), round(y * ratio)
+            band = [image.pixelColor(column, row + dy) for dy in range(-5, 6)]
+            self.assertTrue(any(c == QColor('#ffffff') for c in band))
+            self.assertTrue(any(c == QColor('#000000') for c in band))
+        self.assertIs(item.annotations[0], selected)
+        self.assertIs(item.annotations[1], other)
+        self.assertEqual((selected.x1, selected.y1, selected.x2, selected.y2), (30, 30, 150, 130))
+
     def test_filtering_and_background_status_preserve_original_mapping(self):
         self.load_images()
         self.app._set_image_category(0, 'annotated')
@@ -333,6 +392,119 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(item.annotations[0].class_name, 'person')
         self.app._undo()
         self.assertEqual(item.annotations[0].class_name, 'deer')
+
+    def test_label_click_current_row_applies_to_mixed_canvas_selection(self):
+        (self.images / 'classes.txt').write_text('0: bird\n1: cat\n', encoding='utf-8')
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(20, 20, 80, 80, 0, 'bird', .92),
+                            BBox(110, 20, 170, 80, 1, 'cat', .81),
+                            BBox(220, 20, 280, 80, 1, 'cat', .73)]
+        geometry = [(box.x1, box.y1, box.x2, box.y2, box.confidence) for box in item.annotations]
+        canvas = self.app._canvas
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=self.canvas_point(50, 50))
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier,
+                         self.canvas_point(140, 50))
+        panel = self.app._label_panel
+        self.assertEqual(item.get_selected_annotations(), item.annotations[:2])
+        self.assertEqual(panel._visible_labels[panel.list.currentRow()].class_id, 0)
+        self.assertEqual([box.class_name for box in item.annotations], ['bird', 'cat', 'cat'])
+        history = self.app._current_image_undo_manager()
+        self.assertFalse(history.can_undo())
+
+        point = panel.list.visualItemRect(panel.list.currentItem()).center()
+        QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertEqual([(box.class_id, box.class_name) for box in item.annotations],
+                         [(0, 'bird'), (0, 'bird'), (1, 'cat')])
+        self.assertEqual(item.get_selected_annotations(), item.annotations[:2])
+        self.assertEqual([(box.x1, box.y1, box.x2, box.y2, box.confidence) for box in item.annotations],
+                         geometry)
+        self.assertTrue(item.is_dirty)
+        # 相同类别重复应用不产生空撤销记录，一次撤销即可恢复原类别。
+        QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        self.app._undo()
+        self.assertEqual([box.class_name for box in item.annotations], ['bird', 'cat', 'cat'])
+        self.assertFalse(history.can_undo())
+        self.app._redo()
+        self.assertEqual([box.class_name for box in item.annotations], ['bird', 'bird', 'cat'])
+
+    def test_label_mouse_keyboard_search_sort_and_programmatic_highlight(self):
+        self.app._label_note_store.path = self.config / 'label_notes.json'
+        (self.images / 'classes.txt').write_text('0: zebra\n3: bird\n8: cat\n', encoding='utf-8')
+        self.load_images()
+        item = self.app._project.current_image
+        box = BBox(20, 20, 80, 80, 8, 'cat', is_selected=True)
+        item.annotations = [box]
+        panel = self.app._label_panel
+        history = self.app._current_image_undo_manager()
+
+        # 程序定位与排序只调整列表显示，只有用户操作才应用类别。
+        panel.highlight_class(3)
+        self.assertEqual(box.class_id, 8)
+        self.assertFalse(item.is_dirty)
+        self.assertFalse(history.can_undo())
+        panel.set_sort_by_name(False)
+        self.assertEqual([label.class_id for label in panel._visible_labels], [0, 3, 8])
+        self.assertEqual(box.class_id, 8)
+        point = panel.list.visualItemRect(panel.list.item(0)).center()
+        QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertEqual((box.class_id, box.class_name), (0, 'zebra'))
+        self.app._undo()
+        self.assertEqual(box.class_id, 8)
+        self.assertFalse(history.can_undo())
+
+        # 键盘切换继续使用行变化入口，单选改类后的列表重建不重复记录撤销。
+        QTest.keyClick(panel.list, Qt.Key.Key_Up)
+        self.assertEqual((box.class_id, box.class_name), (3, 'bird'))
+        self.app._undo()
+        self.assertEqual(box.class_id, 8)
+        self.assertFalse(history.can_undo())
+
+        panel.search.setText('bird')
+        panel.highlight_class(3)
+        self.assertEqual(panel.list.count(), 1)
+        self.assertEqual(box.class_id, 8)
+        point = panel.list.visualItemRect(panel.list.currentItem()).center()
+        QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertEqual((box.class_id, box.class_name), (3, 'bird'))
+        self.app._undo()
+        self.assertEqual(box.class_id, 8)
+        self.assertFalse(history.can_undo())
+
+        item.deselect_all()
+        panel.highlight_class(3)
+        point = panel.list.visualItemRect(panel.list.currentItem()).center()
+        with patch('ui.qt.panels.QInputDialog.getText', return_value=('飞鸟', True)) as edit_note:
+            QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            QTest.mouseDClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        edit_note.assert_called_once()
+        self.assertEqual(self.app._label_note_store.get('bird'), '飞鸟')
+        self.assertTrue(self.app._label_note_store.path.is_file())
+        self.assertFalse(history.can_undo())
+
+    def test_label_click_respects_pending_and_active_video_read_only(self):
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(20, 20, 80, 80, 0, 'deer', is_selected=True),
+                            BBox(110, 20, 170, 80, 1, 'person', is_selected=True)]
+        panel = self.app._label_panel
+        history = self.app._current_image_undo_manager()
+
+        def click_current_class():
+            panel.highlight_class(0)
+            point = panel.list.visualItemRect(panel.list.currentItem()).center()
+            QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            self.assertEqual([box.class_id for box in item.annotations], [0, 1])
+            self.assertFalse(item.is_dirty)
+            self.assertFalse(history.can_undo())
+
+        self.app._pending_video_generation = 1
+        try:
+            click_current_class()
+        finally:
+            self.app._pending_video_generation = None
+        self.open_video()
+        click_current_class()
 
     def test_video_click_step_seek_speed_and_original_preview(self):
         self.open_video()

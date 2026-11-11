@@ -21,10 +21,10 @@ CLASS_LIST_FONT_SIZE = 14
 ASSET_DIRECTORY = Path(__file__).resolve().parent / 'assets'
 THEME_COLORS = {
     'dark': {'background': BACKGROUND, 'surface': SURFACE, 'text': TEXT, 'muted': MUTED,
-             'canvas': '#0d1117', 'placeholder': '#8e9caf', 'crosshair': '#6e8bad',
+             'canvas': '#0d1117', 'placeholder': '#8e9caf', 'crosshair': '#6482a6',
              'success': '#78c8a0', 'uncertain': '#e9bd77'},
     'light': {'background': '#f2f5fa', 'surface': '#ffffff', 'text': '#233249', 'muted': '#596b83',
-              'canvas': '#e7edf5', 'placeholder': '#596b83', 'crosshair': '#6381a8',
+              'canvas': '#e7edf5', 'placeholder': '#596b83', 'crosshair': '#58779f',
               'success': '#238457', 'uncertain': '#94600f'},
 }
 # 成对映射控件色彩，替换时一次完成，避免浅色值再次命中深色替换项。

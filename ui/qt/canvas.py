@@ -2,7 +2,7 @@
 
 import math
 from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import QPainter, QPen, QColor, QImage, QFont, QCursor
+from PySide6.QtGui import QPainter, QPen, QColor, QImage, QFont, QCursor, QPixmap
 from PySide6.QtWidgets import QWidget
 from core.annotation import BBox
 from ui.canvas_state import CanvasMode, LABEL_MODE_CYCLE, LABEL_MODE_FULL, LABEL_MODE_COMPACT
@@ -14,6 +14,13 @@ DRAG_THRESHOLD = 3
 HANDLE_RADIUS = 4
 HANDLE_HIT_RADIUS = 9
 MINIMUM_BOX_PIXELS = 3
+# 鼠标图形采用固定的小尺寸黑白十字，与延伸的辅助虚线分别绘制。
+CROSS_CURSOR_SIZE = 32
+CROSS_CURSOR_ARM = 9
+CROSS_CURSOR_OUTLINE_WIDTH = 3
+CROSS_CURSOR_CORE_WIDTH = 1
+SELECTED_BOX_OUTLINE_WIDTH = 5
+SELECTED_BOX_CORE_WIDTH = 3
 ROTATED_HANDLES = {'nw': 'se', 'ne': 'sw', 'sw': 'ne', 'se': 'nw',
                    'n': 's', 's': 'n', 'w': 'e', 'e': 'w'}
 
@@ -49,6 +56,22 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         self._context_menu = None
         self._on_image_context_menu = app._on_canvas_image_context_menu
         self._on_video_context_menu = app._show_video_context_menu
+        self._crosshair_cursor = self._create_crosshair_cursor()
+
+    @staticmethod
+    def _create_crosshair_cursor():
+        pixmap = QPixmap(CROSS_CURSOR_SIZE, CROSS_CURSOR_SIZE)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        center = CROSS_CURSOR_SIZE // 2
+        painter = QPainter(pixmap)
+        for color, width in (('#ffffff', CROSS_CURSOR_OUTLINE_WIDTH), ('#000000', CROSS_CURSOR_CORE_WIDTH)):
+            pen = QPen(QColor(color), width)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(pen)
+            painter.drawLine(center - CROSS_CURSOR_ARM, center, center + CROSS_CURSOR_ARM, center)
+            painter.drawLine(center, center - CROSS_CURSOR_ARM, center, center + CROSS_CURSOR_ARM)
+        painter.end()
+        return QCursor(pixmap, center, center)
 
     @property
     def mode(self):
@@ -213,16 +236,25 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         painter.drawImage(frame_rect, self._qimage)
         painter.restore()
         boxes = self._video_annotations if self._video_mode else self._current_image.annotations
-        for index, box in enumerate(boxes):
+        indexed_boxes = list(enumerate(boxes))
+        if not self._video_mode:
+            # 仅调整绘制顺序，保持实例序号和数据顺序，选中框最后覆盖显示。
+            indexed_boxes.sort(key=lambda pair: pair[1].is_selected)
+        for index, box in indexed_boxes:
             rect = self._rect(box)
             color = QColor(self.app._label_manager.get_color(box.class_id))
             selected = box.is_selected and not self._video_mode
-            painter.setPen(QPen(color, 2.5 if selected else 1.7))
             painter.setBrush(Qt.BrushStyle.NoBrush)
+            if selected:
+                painter.setPen(QPen(QColor('#000000'), SELECTED_BOX_OUTLINE_WIDTH))
+                painter.drawRect(rect)
+                painter.setPen(QPen(QColor('#ffffff'), SELECTED_BOX_CORE_WIDTH))
+            else:
+                painter.setPen(QPen(color, 1.7))
             painter.drawRect(rect)
             if selected:
-                painter.setBrush(color)
-                painter.setPen(QPen(QColor('#eaf2ff'), 1))
+                painter.setBrush(QColor('#ffffff'))
+                painter.setPen(QPen(color, 1.5))
                 for point in self._handles(box).values():
                     painter.drawRoundedRect(QRectF(point.x() - HANDLE_RADIUS, point.y() - HANDLE_RADIUS,
                                                    2 * HANDLE_RADIUS, 2 * HANDLE_RADIUS), 1, 1)
@@ -253,6 +285,14 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             painter.setPen(QPen(QColor(theme_color('crosshair', theme)), 0.7, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(self._pointer.x(), 0), QPointF(self._pointer.x(), self.height()))
             painter.drawLine(QPointF(0, self._pointer.y()), QPointF(self.width(), self._pointer.y()))
+
+    def _update_pointer_cursor(self):
+        if (self._video_mode or not self._current_image or self._pointer is None
+                or not self._frame_rect().contains(self._pointer)):
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+        handle, box = self._find_handle(self._pointer)
+        self.setCursor(Qt.CursorShape.SizeAllCursor if box or self._hover else self._crosshair_cursor)
 
     def mousePressEvent(self, event):
         self.setFocus()
@@ -292,8 +332,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         self._pointer = point
         self._hover = self._find_box(point)
         if self._press is None:
-            handle, box = self._find_handle(point)
-            self.setCursor(Qt.CursorShape.SizeAllCursor if box or self._hover else Qt.CursorShape.CrossCursor)
+            self._update_pointer_cursor()
             self.update()
             return
         distance = (point - self._press).manhattanLength()
@@ -396,7 +435,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
             self._space = False
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self._update_pointer_cursor()
         else:
             super().keyReleaseEvent(event)
 

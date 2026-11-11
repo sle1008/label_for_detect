@@ -1,5 +1,6 @@
 """窗口关闭回归测试，使用临时配置隔离用户数据。"""
 
+import gc
 import sys
 import tempfile
 import threading
@@ -42,14 +43,18 @@ class WindowCloseTests(unittest.TestCase):
     def _cleanup_window(self):
         # 失败用例仍保留窗口，清理时取消定时任务并释放测试资源。
         try:
-            exists = self.app.winfo_exists()
-        except tk.TclError:
-            return
-        if exists:
-            for callback in self.app.tk.call('after', 'info'):
-                self.app.after_cancel(callback)
-            self.app._image_loader.shutdown()
-            self.app.destroy()
+            try:
+                exists = self.app.winfo_exists()
+            except tk.TclError:
+                exists = False
+            if exists:
+                for callback in self.app.tk.call('after', 'info'):
+                    self.app.after_cancel(callback)
+                self.app._image_loader.shutdown()
+                self.app.destroy()
+        finally:
+            self.app = None
+            gc.collect()
 
     def _click_close(self):
         # 调用标题栏关闭按钮注册的 Tcl 回调，覆盖真实的窗口协议入口。

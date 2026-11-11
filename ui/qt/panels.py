@@ -269,6 +269,8 @@ class LabelPanel(QFrame):
         self.list.setObjectName('classList')
         self.list.setUniformItemSizes(True)
         self.list.currentRowChanged.connect(self.select_class)
+        # 点击当前行也应用类别；刷新可能重建条目，因此回调只读取列表当前行。
+        self.list.itemClicked.connect(lambda _item: self.select_class(self.list.currentRow()))
         self.list.itemDoubleClicked.connect(lambda item: self.edit_note())
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()

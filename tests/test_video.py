@@ -1,5 +1,6 @@
 """视频播放状态与逐帧推理回归测试，视频和配置均在临时目录中创建。"""
 
+import gc
 import sys
 import tempfile
 import threading
@@ -39,7 +40,7 @@ class VideoControlsTests(unittest.TestCase):
         self.root = tk.Tk()
         # 界面移至屏幕外，只验证真实 Tk 控件事件，不打断用户当前窗口。
         self.root.geometry('800x100+20000+20000')
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(self.cleanup_controls)
         self.on_seek = Mock(return_value='break')
         self.on_speed = Mock()
         self.controls = VideoControls(
@@ -48,6 +49,13 @@ class VideoControlsTests(unittest.TestCase):
         self.controls.pack(fill='x')
         self.controls.set_duration(100)
         self.root.update()
+
+    def cleanup_controls(self):
+        self.root.destroy()
+        # Tcl 对象必须在创建它的主线程释放，不能留给后台任务触发的 GC。
+        self.controls = None
+        self.root = None
+        gc.collect()
 
     def test_scale_release_cancels_native_repeat_timer(self):
         controls = self.controls
@@ -105,6 +113,9 @@ class VideoCanvasClickTests(unittest.TestCase):
         for callback in self.root.tk.call('after', 'info'):
             self.root.tk.call('after', 'cancel', callback)
         self.root.destroy()
+        self.canvas = None
+        self.root = None
+        gc.collect()
 
     def click(self, x, y):
         self.canvas.event_generate('<ButtonPress-1>', x=x, y=y)
@@ -411,6 +422,8 @@ class VideoAppFixture(VideoFixture):
         self.app._image_loader.shutdown()
         self.app.destroy()
         self.assertEqual(self.callback_errors, [], 'Tk 回调不应发生未处理异常')
+        self.app = None
+        gc.collect()
 
     def open_video(self):
         with patch('ui.app.filedialog.askopenfilename', return_value=str(self.video_path)):
