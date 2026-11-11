@@ -2,8 +2,13 @@
 
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Optional
-from PIL import Image, ImageTk
+from typing import List, Optional, TYPE_CHECKING
+from PIL import Image
+
+# ==================== 图像模型参数设置区 ====================
+# 显示缓存类型只用于静态检查，数据模型无需加载任何窗口工具包。
+if TYPE_CHECKING:
+    from PIL import ImageTk
 
 from core.annotation import BBox
 
@@ -22,7 +27,7 @@ class ImageItem:
     _annotation_file_path: Optional[Path] = None
     manual_annotation_status: Optional[str] = None  # annotated | unannotated | uncertain
     _pil_image: Optional[Image.Image] = None
-    _photo_image: Optional[ImageTk.PhotoImage] = None
+    _photo_image: Optional['ImageTk.PhotoImage'] = None
     
     def mark_dirty(self):
         # Any in-memory edit makes this annotation list authoritative. This

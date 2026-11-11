@@ -24,11 +24,14 @@ class _StderrFilter:
         return getattr(self._stream, name)
 
 
-sys.stderr = _StderrFilter(sys.stderr)
+if sys.stderr is not None:
+    sys.stderr = _StderrFilter(sys.stderr)
 
-# Enable high-DPI awareness on Windows (must be before Tk init)
+# ==================== 启动参数设置区 ====================
+# Qt 自动处理每屏 DPI；仅兼容入口需要提前设置 Tk 的 DPI 感知。
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    if '--legacy-ui' in sys.argv:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
     try:
         ctypes.windll.user32.SetProcessDPIAware()
@@ -42,7 +45,6 @@ PROJECT_ROOT = get_app_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ui.app import AnnotationApp
 
 
 _SINGLE_INSTANCE_MUTEX_NAME = r'Local\AnnotationTool.SingleInstance.6F7D94A1'
@@ -108,7 +110,13 @@ def main():
     parser.add_argument('--dir', type=str, help='初始图片目录')
     parser.add_argument('--labels', type=str, help='标签文件路径')
     parser.add_argument('--weights', type=str, help='预标注模型 (.pt/.onnx/.engine/.trt)')
+    parser.add_argument('--legacy-ui', action='store_true', help='使用稳定版 Tk 兼容界面')
     args = parser.parse_args()
+
+    if args.legacy_ui:
+        from ui.app import AnnotationApp
+    else:
+        from ui.qt.app import AnnotationApp
 
     try:
         app = AnnotationApp()

@@ -1,6 +1,8 @@
 # 目标检测标注工具 (label_for_detect)
 
-基于 Python + Tkinter 的桌面端目标检测标注工具，支持 YOLO 格式标注、YOLO 预标注、按分类筛选图片，以及常用标注编辑操作。
+基于 Python + PySide6 / Qt 的桌面端目标检测标注工具，支持 YOLO 格式标注、YOLO 预标注、按分类筛选图片，以及常用标注编辑操作。默认使用深色现代工作台，图片、视频和标注保存逻辑沿用稳定版本。
+
+![现代标注工作台](docs/modern-ui-preview.png)
 
 ## 功能概览
 
@@ -28,15 +30,19 @@ python main.py
 
 Windows 下也可双击 `start.bat` 或 `start.vbs`（无控制台窗口启动）。
 
+新版布局分为左侧资源与筛选、中间标注画布、右侧推理引擎 / 标签类别 / 标注实例。拖动分隔线可调整面板宽度；底部“活动日志”可查看操作记录。文件选择、类别备注、统计、快捷键说明和导出窗口均使用 Qt 控件。
+
 可选参数：
 
 ```bash
 python main.py --dir "D:/images" --weights "model.pt"
 ```
 
+稳定版界面仍可通过 `python main.py --legacy-ui` 启动。框架选择、迁移范围与回退说明见 [现代界面说明](docs/modern-ui.md)。
+
 ## 标注文件说明
 
-- 每张图片旁生成同名 `.txt`（YOLO 格式：`class_id cx cy w h`）
+- 标注保存为同名 `.txt`（YOLO 格式：`class_id cx cy w h`）。目录包含 `images` 层级时优先保存到对应的 `labels` 目录，其余图片保存到图片旁；读取时兼容已有标注位置。
 - **已标注**：存在 `.txt`（可为空文件，表示背景/负样本）
 - **未标注**：无 `.txt`
 - **不确定**：根目录 `.annotation_status.json` 中记录（仅此状态需要额外文件）

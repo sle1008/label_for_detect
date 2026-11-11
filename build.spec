@@ -18,6 +18,9 @@ a = Analysis(
     datas=video_encoder_data,
     hiddenimports=[
         'PIL._tkinter_finder',
+        'PySide6.QtCore',
+        'PySide6.QtGui',
+        'PySide6.QtWidgets',
         'yaml',
         'onnxruntime',
         'ultralytics',

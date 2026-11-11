@@ -3,7 +3,6 @@
 import math
 import tkinter as tk
 from typing import Optional, List, Tuple, Callable
-from enum import Enum, auto
 from PIL import Image, ImageTk
 
 from core.annotation import BBox
@@ -20,18 +19,10 @@ from utils.constants import (
 )
 from utils.geometry import point_in_rect, point_on_rect_edge
 from utils.colors import get_color_for_class
+from ui.canvas_state import (CanvasMode, LABEL_MODE_COMPACT, LABEL_MODE_FULL,
+                             LABEL_MODE_HIDDEN, LABEL_MODE_CYCLE, LABEL_MODE_NAMES)
 
 
-# Label display modes (declutter when there are many boxes)
-LABEL_MODE_COMPACT = 'compact'   # only #index; selected/hovered show full label
-LABEL_MODE_FULL = 'full'         # all boxes show full label
-LABEL_MODE_HIDDEN = 'hidden'     # no labels; selected/hovered show full label
-LABEL_MODE_CYCLE = (LABEL_MODE_FULL, LABEL_MODE_COMPACT, LABEL_MODE_HIDDEN)
-LABEL_MODE_NAMES = {
-    LABEL_MODE_COMPACT: '精简',
-    LABEL_MODE_FULL: '全部',
-    LABEL_MODE_HIDDEN: '隐藏',
-}
 
 # Canvas tag shared by every bbox-related item (rect/label/handles), so the
 # annotations can be cleared and redrawn without touching the image bitmap.
@@ -45,15 +36,6 @@ ROTATED_HANDLE_MAP = {
     'nw': 'se', 'ne': 'sw', 'sw': 'ne', 'se': 'nw',
     'n': 's', 's': 'n', 'w': 'e', 'e': 'w',
 }
-
-
-class CanvasMode(Enum):
-    IDLE = auto()
-    DRAWING = auto()
-    MOVING = auto()
-    RESIZING = auto()
-    SELECTING = auto()  # Rubber-band selection
-    PANNING = auto()
 
 
 class AnnotationCanvas(tk.Canvas):
