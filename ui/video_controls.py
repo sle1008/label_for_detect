@@ -14,7 +14,7 @@ class VideoControls(ttk.Frame):
     """提供播放控制、时间显示和可拖动的视频进度条。"""
 
     def __init__(self, parent, on_toggle_play=None, on_seek=None,
-                 on_seek_start=None, on_speed_changed=None):
+                 on_seek_start=None, on_speed_changed=None, on_export=None):
         super().__init__(parent)
         self._on_toggle_play = on_toggle_play
         self._on_seek = on_seek
@@ -25,6 +25,7 @@ class VideoControls(ttk.Frame):
         self._position = tk.DoubleVar(value=0.0)
         self._speed = tk.StringVar(value=SPEED_OPTIONS[0])
         self._enabled = False
+        self._export_busy = False
 
         self._play_button = ttk.Button(self, text='播放', command=self._toggle_play)
         self._play_button.grid(row=0, column=0, padx=(4, 8), pady=4)
@@ -44,6 +45,8 @@ class VideoControls(ttk.Frame):
         )
         self._speed_combo.grid(row=0, column=3, padx=(0, 8), pady=4)
         self._speed_combo.bind('<<ComboboxSelected>>', self._change_speed)
+        self._export_button = ttk.Button(self, text='导出视频', command=on_export)
+        self._export_button.grid(row=0, column=4, padx=(0, 8), pady=4)
         self.set_enabled(False)
 
     @staticmethod
@@ -110,6 +113,13 @@ class VideoControls(ttk.Frame):
         self._play_button.configure(state=state)
         self._scale.configure(state=state)
         self._speed_combo.configure(state='readonly' if enabled else 'disabled')
+        self.set_export_busy(self._export_busy)
+
+    def set_export_busy(self, busy):
+        self._export_busy = bool(busy)
+        self._export_button.configure(
+            state='normal' if self._enabled and not self._export_busy else 'disabled'
+        )
 
     def set_speed(self, speed):
         self._speed.set(f'{speed:g}x')

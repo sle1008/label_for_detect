@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
+from PIL import Image
 
 # ==================== 测试参数设置区 ====================
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,14 +19,17 @@ TEST_FRAME_SIZE = (64, 48)
 TEST_FPS = 20.0
 TEST_FRAME_COUNT = 20
 WAIT_TIMEOUT_SECONDS = 4.0
+TEST_CANVAS_GEOMETRY = '400x300+20000+20000'
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.annotation import BBox
 from core.config import ConfigManager
+from core.image_item import ImageItem
 from core.label_manager import LabelManager
 from io_ops.pre_annotator import PreAnnotator
 from io_ops.video_player import VideoPlayer, VIDEO_PLAYBACK_SPEEDS
 from ui.app import AnnotationApp
+from ui.canvas_panel import AnnotationCanvas
 from ui.video_controls import VideoControls, SPEED_OPTIONS
 
 
@@ -81,6 +85,69 @@ class VideoControlsTests(unittest.TestCase):
             self.controls._speed_combo.event_generate('<<ComboboxSelected>>')
             self.root.update()
             self.on_speed.assert_called_with(speed)
+
+
+class VideoCanvasClickTests(unittest.TestCase):
+    """真实鼠标事件验证画面命中范围，以及图片模式的原有点击语义。"""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.geometry(TEST_CANVAS_GEOMETRY)
+        self.canvas = AnnotationCanvas(self.root)
+        self.canvas.pack(fill='both', expand=True)
+        self.on_toggle = Mock()
+        self.canvas.set_video_toggle_play_handler(self.on_toggle)
+        self.root.update()
+        self.addCleanup(self.cleanup_canvas)
+
+    def cleanup_canvas(self):
+        for callback in self.root.tk.call('after', 'info'):
+            self.root.tk.call('after', 'cancel', callback)
+        self.root.destroy()
+
+    def click(self, x, y):
+        self.canvas.event_generate('<ButtonPress-1>', x=x, y=y)
+        self.canvas.event_generate('<ButtonRelease-1>', x=x, y=y)
+
+    def test_only_video_pixels_receive_clicks_in_landscape_and_portrait_views(self):
+        for size in ((640, 180), (180, 640)):
+            with self.subTest(size=size):
+                self.canvas.show_video_frame(Image.new('RGB', size))
+                left, top, right, bottom = self.canvas.bbox(self.canvas._image_id)
+                center_x, center_y = (left + right) // 2, (top + bottom) // 2
+                self.on_toggle.reset_mock()
+                for x, y in ((left - 1, center_y), (right, center_y),
+                             (center_x, top - 1), (center_x, bottom)):
+                    self.click(x, y)
+                self.on_toggle.assert_not_called()
+                self.click(center_x, center_y)
+                self.on_toggle.assert_called_once_with()
+
+    def test_drags_and_presses_from_outside_do_not_toggle_playback(self):
+        self.canvas.show_video_frame(Image.new('RGB', (640, 180)))
+        left, top, right, bottom = self.canvas.bbox(self.canvas._image_id)
+        x, y = (left + right) // 2, (top + bottom) // 2
+        self.canvas.event_generate('<ButtonPress-1>', x=x, y=top - 1)
+        self.canvas.event_generate('<ButtonRelease-1>', x=x, y=top)
+        self.canvas.event_generate('<ButtonPress-1>', x=x, y=top)
+        self.canvas.event_generate('<ButtonRelease-1>', x=x, y=top - 1)
+        self.canvas.event_generate('<ButtonPress-1>', x=x, y=y)
+        self.canvas.event_generate('<B1-Motion>', x=x + 20, y=y)
+        self.canvas.event_generate('<ButtonRelease-1>', x=x, y=y)
+        self.on_toggle.assert_not_called()
+
+    def test_image_clicks_still_select_boxes_without_toggling_video(self):
+        self.canvas.show_video_frame(Image.new('RGB', (640, 180)))
+        box = BBox(20, 20, 100, 100, 0, 'object')
+        item = ImageItem(Path('click_test.jpg'), width=200, height=150, annotations=[box])
+        self.canvas.set_image(item, Image.new('RGB', (200, 150)))
+        x, y = self.canvas.image_to_canvas(50, 50)
+        self.click(int(x), int(y))
+        self.assertTrue(box.is_selected)
+        x, y = self.canvas.image_to_canvas(150, 100)
+        self.click(int(x), int(y))
+        self.assertFalse(box.is_selected)
+        self.on_toggle.assert_not_called()
 
 
 def wait_for(predicate, pump=None):
@@ -307,7 +374,7 @@ class VideoInferenceTests(VideoFixture):
         np.testing.assert_array_equal(actual, frame)
 
 
-class VideoAppTests(VideoFixture):
+class VideoAppFixture(VideoFixture):
     def setUp(self):
         super().setUp()
         config_patch = patch('ui.app.ConfigManager', return_value=ConfigManager(str(self.root)))
@@ -318,6 +385,8 @@ class VideoAppTests(VideoFixture):
         self.addCleanup(restore_patch.stop)
         self.app = AnnotationApp()
         self.app.withdraw()
+        self.callback_errors = []
+        self.app.report_callback_exception = lambda *error: self.callback_errors.append(error)
         self.addCleanup(self.cleanup_app)
 
     def cleanup_app(self):
@@ -326,21 +395,51 @@ class VideoAppTests(VideoFixture):
         if player:
             player._thread.join(WAIT_TIMEOUT_SECONDS)
         for callback in self.app.tk.call('after', 'info'):
-            self.app.after_cancel(callback)
+            # 定时器可归属子控件，取消 Tcl 调度后由各控件销毁自己的回调命令。
+            self.app.tk.call('after', 'cancel', callback)
         self.app._image_loader.shutdown()
         self.app.destroy()
+        self.assertEqual(self.callback_errors, [], 'Tk 回调不应发生未处理异常')
 
     def open_video(self):
         with patch('ui.app.filedialog.askopenfilename', return_value=str(self.video_path)):
             self.app._open_video()
         wait_for(lambda: self.app._canvas._video_mode, self.app.update)
 
+
+class VideoAppTests(VideoAppFixture):
     def test_open_video_needs_no_weights_and_starts_paused(self):
         self.open_video()
         self.assertFalse(self.app._pre_annotator.is_loaded)
         self.assertFalse(self.app._video_player.playing)
         self.assertIsNone(self.app._video_annotations)
         self.assertEqual(self.app._video_frame_index, 0)
+
+    def test_clicking_video_toggles_play_and_pause_and_respects_inference(self):
+        self.app.geometry('1100x700+20000+20000')
+        self.app.deiconify()
+        self.app.update()
+        self.open_video()
+        canvas = self.app._canvas
+        left, top, right, bottom = canvas.bbox(canvas._image_id)
+        x, y = (left + right) // 2, (top + bottom) // 2
+
+        def click():
+            canvas.event_generate('<ButtonPress-1>', x=x, y=y)
+            canvas.event_generate('<ButtonRelease-1>', x=x, y=y)
+
+        click()
+        self.assertTrue(self.app._video_player.playing)
+        self.assertEqual(self.app._video_controls._play_button.cget('text'), '暂停')
+        click()
+        self.assertFalse(self.app._video_player.playing)
+        self.assertEqual(self.app._video_controls._play_button.cget('text'), '播放')
+        self.app._video_inference_running = True
+        try:
+            click()
+            self.assertFalse(self.app._video_player.playing)
+        finally:
+            self.app._video_inference_running = False
 
     def test_ctrl_x_caches_all_frames_then_playback_and_seek_reuse_results(self):
         self.open_video()

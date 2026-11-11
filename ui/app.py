@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.annotation import BBox
 from core.image_item import ImageItem
+from core.video_item import VideoItem
 from core.label_manager import LabelManager
 from core.label_notes import LabelNoteStore
 from core.project import Project, ImageFilter
@@ -23,6 +24,9 @@ from core.undo_redo import UndoRedoManager, Command, CompoundCommand
 from core.config import AppConfig, ConfigManager
 from io_ops.image_loader import AsyncImageLoader
 from io_ops.video_player import VideoPlayer, DEFAULT_VIDEO_FPS
+from io_ops.video_export import (
+    export_annotated_video, validate_video_export_path, VideoExportCancelled,
+)
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.label_set_detector import iter_label_set_candidates
 from io_ops.yolo_exporter import export_yolo
@@ -88,6 +92,7 @@ LABEL_FILTER_ITEMS_PER_COLUMN = 40
 VIDEO_FRAME_POLL_MS = 15
 VIDEO_FILETYPES = [('视频文件', '*.mp4 *.avi *.mov *.mkv *.wmv *.m4v'), ('所有文件', '*.*')]
 VIDEO_SUPPORTED_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
+VIDEO_DELETE_JOIN_SECONDS = 5.0
 # 图片显示方向的快捷键，便于在画布聚焦时快速操作。
 ROTATE_IMAGE_SHORTCUT = 'r'
 
@@ -150,6 +155,14 @@ class AnnotationApp(tk.Tk):
         self._label_filter_display_to_id = {'全部标签': None}
         self._label_filter_popup = None
         self._video_player = None
+        self._video_item = None
+        self._video_open_action = None
+        self._video_opening_path = ''
+        self._video_export_pending = None
+        self._video_export_running = False
+        self._video_export_stop_event = None
+        self._video_export_token = 0
+        self._video_delete_running = False
         self._video_path = ''
         self._pending_video_generation = None
         self._video_open_stop_event = None
@@ -268,6 +281,8 @@ class AnnotationApp(tk.Tk):
             on_context_menu=self._on_image_context_menu,
             on_prev_image=self._prev_image,
             on_next_image=self._next_image,
+            on_video_selected=self._on_video_selected,
+            on_video_context_menu=self._show_video_context_menu,
         )
         self._thumb_panel.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self._paned.add(
@@ -288,6 +303,8 @@ class AnnotationApp(tk.Tk):
         self._canvas.set_label_manager(self._label_manager)
         self._setup_canvas_context_menu()
         self._canvas.set_image_context_menu_handler(self._on_canvas_image_context_menu)
+        self._canvas.set_video_context_menu_handler(self._show_video_context_menu)
+        self._canvas.set_video_toggle_play_handler(self._toggle_video_play)
         self._canvas.pack(fill='both', expand=True)
         self._video_controls = VideoControls(
             self._center_wrap,
@@ -295,6 +312,7 @@ class AnnotationApp(tk.Tk):
             on_seek=self._seek_video,
             on_seek_start=self._begin_video_seek,
             on_speed_changed=self._set_video_speed,
+            on_export=self._export_video,
         )
         self._video_controls.pack(fill='x', side='bottom')
         self._video_controls.pack_forget()
@@ -2685,6 +2703,13 @@ class AnnotationApp(tk.Tk):
         if Path(path).suffix.lower() not in VIDEO_SUPPORTED_EXTENSIONS:
             self._status_bar.warning('所选文件格式不是支持的视频格式')
             return
+        self._load_video_path(path)
+
+    def _load_video_path(self, path, on_opened=None):
+        """列表选择和文件对话框共用打开流程，图片保存仍走原有入口。"""
+        if self._video_delete_running:
+            self._status_bar.warning('正在删除视频，请稍候')
+            return
         if (self._video_path or self._pending_video_generation is not None) and self._project.current_image:
             if not self._save_before_navigate():
                 return
@@ -2693,6 +2718,8 @@ class AnnotationApp(tk.Tk):
             if not self._save_before_navigate():
                 return
         self._stop_video(clear_canvas=False)
+        self._video_open_action = on_opened
+        self._video_opening_path = path
         self._status_bar.set_info(f'正在打开视频: {Path(path).name}')
         generation = self._video_generation
         self._pending_video_generation = generation
@@ -2735,6 +2762,8 @@ class AnnotationApp(tk.Tk):
             return
         self._pending_video_generation = None
         self._video_open_stop_event = None
+        self._video_open_action = None
+        self._video_opening_path = ''
         showerror(self, '视频打开失败', f'无法打开视频文件：\n{path}')
         self._status_bar.error(f'无法打开视频: {Path(path).name}')
 
@@ -2744,6 +2773,13 @@ class AnnotationApp(tk.Tk):
             return
         self._pending_video_generation = None
         self._video_open_stop_event = None
+        self._video_opening_path = ''
+        if self._video_item is None or self._video_item.path != Path(path):
+            self._video_item = VideoItem(Path(path))
+        self._video_item.fps = fps
+        self._video_item.frame_count = frame_count
+        self._video_annotations = self._video_item.annotations
+        self._thumb_panel.set_video(path, selected=True)
         self._video_player = VideoPlayer(capture, fps, frame_count)
         self._video_path = path
         self._video_fps = fps
@@ -2759,6 +2795,221 @@ class AnnotationApp(tk.Tk):
         self._video_controls.set_speed(self._video_speed)
         self._status_bar.set_info(f'视频已读取: {Path(path).name}，按 Ctrl+X 开始逐帧推理')
         self._schedule_video_result_poll()
+        action = self._video_open_action
+        self._video_open_action = None
+        if action is not None:
+            action()
+
+    def _on_video_selected(self):
+        item = self._video_item
+        if item is None:
+            return
+        path = str(item.path)
+        if self._video_path == path:
+            return
+        if self._pending_video_generation is not None and self._video_opening_path == path:
+            return
+        self._load_video_path(path)
+
+    def _ensure_listed_video_active(self, action):
+        item = self._video_item
+        if item is None:
+            return
+        path = str(item.path)
+        if self._video_path == path:
+            action()
+        elif self._pending_video_generation is not None and self._video_opening_path == path:
+            self._video_open_action = action
+        else:
+            self._load_video_path(path, on_opened=action)
+
+    def _infer_listed_video(self):
+        self._ensure_listed_video_active(self._pre_annotate_current)
+
+    def _show_video_context_menu(self, event):
+        if self._video_item is None:
+            return
+        busy = self._pre_annotator.is_busy or self._weights_load_in_progress
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label='从列表中删除', command=self._remove_video_from_list)
+        menu.add_command(
+            label='删除视频', command=self._delete_video,
+            state='disabled' if busy or self._video_export_running or self._video_delete_running
+            or self._pending_video_generation is not None else 'normal',
+        )
+        menu.add_separator()
+        menu.add_command(label='推理视频', command=self._infer_listed_video,
+                         state='disabled' if busy or self._video_delete_running else 'normal')
+        menu.add_command(
+            label='导出视频', command=self._export_video,
+            state='disabled' if self._video_export_running or self._video_export_pending
+            or self._video_delete_running else 'normal',
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _show_image_after_video(self):
+        """视频视图退出后只恢复当前图片，不修改项目中的图片列表或筛选。"""
+        if self._project.current_image is not None:
+            self._show_current_image_async()
+        else:
+            self._canvas.clear_all()
+            self._box_list_panel.set_image(None)
+            self._update_window_title()
+
+    def _remove_video_from_list(self):
+        item = self._video_item
+        if item is None:
+            return
+        was_active = bool(self._video_path or self._pending_video_generation is not None)
+        if was_active:
+            self._stop_video(clear_canvas=False)
+        self._video_item = None
+        self._thumb_panel.clear_video()
+        if was_active:
+            self._show_image_after_video()
+        self._status_bar.info(f'视频已从列表中移除，原文件保留: {item.path.name}')
+
+    def _delete_video(self):
+        item = self._video_item
+        if item is None:
+            return
+        if (self._pre_annotator.is_busy or self._video_export_running
+                or self._video_delete_running or self._pending_video_generation is not None):
+            self._status_bar.warning('请等待视频读取、推理或导出任务完成后再删除视频')
+            return
+        if not askyesno(self, '删除视频', f'确定从磁盘删除此视频？此操作不可撤销。\n\n{item.path}'):
+            return
+        player = self._video_player
+        if player is not None:
+            self._stop_video(clear_canvas=False)
+            self._show_image_after_video()
+        self._video_delete_running = True
+
+        def worker():
+            error = ''
+            try:
+                if player is not None:
+                    player._thread.join(VIDEO_DELETE_JOIN_SECONDS)
+                    if player._thread.is_alive():
+                        raise OSError('视频解码器尚未释放，请稍后重试')
+                item.path.unlink()
+            except OSError as exc:
+                error = str(exc)
+
+            def finish():
+                self._video_delete_running = False
+                if error:
+                    showerror(self, '删除视频失败', error)
+                    return
+                if self._video_item is item:
+                    self._video_item = None
+                    self._thumb_panel.clear_video()
+                self._status_bar.success(f'视频已从磁盘删除: {item.path.name}')
+
+            self._call_in_main(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_video(self):
+        item = self._video_item
+        if item is None:
+            return
+        if self._video_delete_running:
+            self._status_bar.warning('正在删除视频，请稍候')
+            return
+        if self._video_export_running or self._video_export_pending is not None:
+            self._status_bar.info('视频导出任务已在进行中')
+            return
+        if item.annotations is None:
+            if self._weights_load_in_progress:
+                self._status_bar.warning('请等待模型权重加载完成后再导出视频')
+                return
+            if not self._pre_annotator.is_loaded:
+                showinfo(self, '导出视频', '导出前需要完成逐帧推理，请先加载模型权重')
+                self._load_weights()
+                return
+            if self._pre_annotator.is_busy and not self._video_inference_running:
+                self._status_bar.warning('请等待当前预标注任务完成后再导出视频')
+                return
+        output = filedialog.asksaveasfilename(
+            parent=self, title='导出带标注框的视频', initialdir=str(item.path.parent),
+            initialfile=f'{item.path.stem}_annotated.mp4', defaultextension='.mp4',
+            filetypes=[('MP4 视频', '*.mp4')],
+        )
+        if not output:
+            return
+        try:
+            validate_video_export_path(item.path, output)
+        except ValueError as exc:
+            showerror(self, '导出视频', str(exc))
+            return
+        if item.annotations is not None:
+            self._start_video_export(item, output)
+            return
+
+        def infer_then_export():
+            self._video_export_pending = (item, output)
+            if self._video_inference_running:
+                self._status_bar.info('逐帧推理完成后将自动导出视频')
+            else:
+                self._pre_annotate_current()
+                # 打开视频期间模型状态可能变化，未能启动时解除导出等待状态。
+                if not self._video_inference_running:
+                    self._video_export_pending = None
+
+        self._ensure_listed_video_active(infer_then_export)
+
+    def _start_video_export(self, item, output):
+        """导出使用视频条目的标注快照，与图片导出和预览时钟相互独立。"""
+        self._video_export_running = True
+        self._video_export_token += 1
+        token = self._video_export_token
+        stop = threading.Event()
+        self._video_export_stop_event = stop
+        annotations = item.annotations
+        self._video_controls.set_export_busy(True)
+        self._status_bar.show_progress(0)
+        self._status_bar.info('正在导出带检测框和置信度的视频...')
+
+        def progress(current, total):
+            def update():
+                if token == self._video_export_token and self._video_export_running:
+                    self._status_bar.update_progress(100 * current / total if total else 0)
+                    self._status_bar.set_overlay(f'视频导出中: {current}/{total} 帧')
+            self._call_in_main(update)
+
+        def worker():
+            result, error, cancelled = None, '', False
+            try:
+                result = export_annotated_video(
+                    item.path, output, annotations, stop_event=stop, progress_callback=progress,
+                )
+            except VideoExportCancelled:
+                cancelled = True
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                if token != self._video_export_token:
+                    return
+                self._video_export_running = False
+                self._video_export_stop_event = None
+                self._video_controls.set_export_busy(False)
+                self._status_bar.hide_progress()
+                if cancelled:
+                    self._status_bar.info('视频导出已取消')
+                elif error:
+                    self._status_bar.error(f'视频导出失败: {error}')
+                    showerror(self, '视频导出失败', error)
+                else:
+                    self._status_bar.success(f'视频导出完成: {result.output_path}')
+
+            self._call_in_main(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _schedule_video_result_poll(self):
         if self._video_poll_after_id is None:
@@ -2776,7 +3027,7 @@ class AnnotationApp(tk.Tk):
             annotations = self._video_annotations_for_frame(result.index)
             self._canvas.show_video_frame(result.image, annotations)
             self._video_controls.set_position(position)
-            if not self._video_inference_running:
+            if not self._video_inference_running and not self._video_export_running:
                 state = '推理完成' if self._video_annotations is not None else '未推理，按 Ctrl+X'
                 self._status_bar.set_overlay(
                     f'视频: {Path(self._video_path).name} | {result.image.width}x{result.image.height} | '
@@ -2843,6 +3094,10 @@ class AnnotationApp(tk.Tk):
     def _stop_video(self, clear_canvas=True):
         """停止后台解码并释放视频资源。"""
         self._video_generation += 1
+        self._video_open_action = None
+        self._video_opening_path = ''
+        self._video_export_pending = None
+        self._thumb_panel.select_video(False)
         if self._video_inference_stop_event is not None:
             self._video_inference_stop_event.set()
             self._video_inference_stop_event = None
@@ -3598,6 +3853,9 @@ class AnnotationApp(tk.Tk):
         self._video_seek_active = False
         self._video_inference_running = True
         self._video_annotations = None
+        item = self._video_item
+        if item is not None:
+            item.annotations = None
         self._video_controls.set_playing(False)
         self._video_controls.set_enabled(False)
         self._toolbar.set_batch_running(True)
@@ -3619,6 +3877,8 @@ class AnnotationApp(tk.Tk):
             self._video_controls.set_enabled(True)
             self._toolbar.set_batch_running(False)
             self._status_bar.hide_progress()
+            pending_export = self._video_export_pending
+            self._video_export_pending = None
             if result.cancelled:
                 self._status_bar.warning('视频推理已停止，未应用不完整结果；按 Ctrl+X 可重新推理')
                 return
@@ -3626,6 +3886,10 @@ class AnnotationApp(tk.Tk):
                 self._status_bar.error(f'视频推理失败: {result.error}')
                 return
             self._video_annotations = result.annotations
+            if item is not None:
+                item.annotations = result.annotations
+                item.fps = player.fps
+                item.frame_count = len(result.annotations)
             self._video_frame_count = len(result.annotations)
             player.set_frame_count(self._video_frame_count)
             self._video_duration = self._video_frame_count / player.fps
@@ -3636,6 +3900,8 @@ class AnnotationApp(tk.Tk):
                 f'视频推理完成: 共 {self._video_frame_count} 帧，'
                 f'耗时 {format_duration(result.elapsed)}；点击播放查看检测框和置信度'
             )
+            if pending_export is not None and pending_export[0] is item:
+                self._start_video_export(item, pending_export[1])
 
         try:
             self._video_inference_stop_event = self._pre_annotator.predict_video_async(
@@ -3872,6 +4138,8 @@ Escape      取消绘制 / 取消选中
     
     def _on_close(self):
         """Handle window close."""
+        if self._video_export_stop_event is not None:
+            self._video_export_stop_event.set()
         self._stop_video(clear_canvas=False)
         if self._pending_video_generation is not None:
             self._pending_video_generation = None

@@ -38,6 +38,8 @@ LABEL_MODE_NAMES = {
 ANNOTATION_TAG = 'annotation'
 
 # ==================== 画布参数设置区 ====================
+# 单击允许少量鼠标抖动，拖动视频画面不触发播放状态切换。
+VIDEO_CLICK_DRAG_THRESHOLD = 3
 # 旋转后将屏幕方向的缩放手柄映射回原图方向，标注数据仍以原图坐标保存。
 ROTATED_HANDLE_MAP = {
     'nw': 'se', 'ne': 'sw', 'sw': 'ne', 'se': 'nw',
@@ -79,6 +81,7 @@ class AnnotationCanvas(tk.Canvas):
         self._video_frame_photo: Optional[ImageTk.PhotoImage] = None
         self._video_annotations: List[BBox] = []
         self._video_mode = False
+        self._video_click_start: Optional[Tuple[float, float]] = None
         self._photo_image: Optional[ImageTk.PhotoImage] = None
         self._label_manager: Optional[LabelManager] = None
         
@@ -127,6 +130,8 @@ class AnnotationCanvas(tk.Canvas):
         self._right_dragging = False
         self._context_menu: Optional[tk.Menu] = None
         self._on_image_context_menu = None
+        self._on_video_context_menu = None
+        self._on_video_toggle_play = None
         
         # Zoom redraw debounce
         self._quality_upgrade_id = None
@@ -165,6 +170,14 @@ class AnnotationCanvas(tk.Canvas):
     def set_image_context_menu_handler(self, handler):
         """Handler(event) for right-click on image blank area (no bbox selected)."""
         self._on_image_context_menu = handler
+
+    def set_video_context_menu_handler(self, handler):
+        """视频菜单独立于图片的框选和标注编辑菜单。"""
+        self._on_video_context_menu = handler
+
+    def set_video_toggle_play_handler(self, handler):
+        """视频单击复用外部播放控制，画布只负责识别有效点击范围。"""
+        self._on_video_toggle_play = handler
     
     def set_label_manager(self, label_manager: LabelManager):
         self._label_manager = label_manager
@@ -192,6 +205,7 @@ class AnnotationCanvas(tk.Canvas):
     def set_image(self, image_item: ImageItem, pil_image: Image.Image = None):
         """Set the current image to display."""
         self._video_mode = False
+        self._video_click_start = None
         if self._current_image is not image_item:
             self._rotation_180 = False
             self._rotated_pil_image = None
@@ -362,6 +376,7 @@ class AnnotationCanvas(tk.Canvas):
         self._rotated_pil_image = None
         self._current_image = None
         self._video_mode = False
+        self._video_click_start = None
         self._rotation_180 = False
         self._video_annotations = []
     
@@ -673,7 +688,10 @@ class AnnotationCanvas(tk.Canvas):
             )
     
     def _on_right_up(self, event):
-        if self._right_dragging and self._mode == CanvasMode.SELECTING:
+        if self._video_mode:
+            if self._on_video_context_menu:
+                self._on_video_context_menu(event)
+        elif self._right_dragging and self._mode == CanvasMode.SELECTING:
             self._finish_rubber_band_select(event)
         elif self._current_image and self._current_image.get_selected_annotations():
             if self._context_menu:
@@ -767,16 +785,29 @@ class AnnotationCanvas(tk.Canvas):
         return 'break'
     
     # --- Mouse events ---
+
+    def _video_frame_contains(self, x, y):
+        """按已绘制的视频图像范围命中，排除画布四周留白。"""
+        if not self._video_mode or self._source_pil_image is None or self._image_id is None:
+            return False
+        bounds = self.bbox(self._image_id)
+        return bool(bounds and bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3])
     
     def _on_mouse_down(self, event):
         """Handle mouse button press."""
         self.focus_set()
         self._clear_press_state()
+        self._video_click_start = None
         
         # Pan with space+click
         if self._space_pressed:
             self._on_pan_start(event)
             return
+
+        if self._video_mode:
+            if self._video_frame_contains(event.x, event.y):
+                self._video_click_start = (event.x, event.y)
+            return 'break'
         
         if not self._current_image:
             return
@@ -824,6 +855,13 @@ class AnnotationCanvas(tk.Canvas):
         if self._mode == CanvasMode.PANNING:
             self._on_pan_move(event)
             return
+
+        if self._video_mode:
+            if self._video_click_start is not None:
+                start_x, start_y = self._video_click_start
+                if math.hypot(event.x - start_x, event.y - start_y) > VIDEO_CLICK_DRAG_THRESHOLD:
+                    self._video_click_start = None
+            return 'break'
 
         if self._show_crosshair and self._current_image:
             self._update_crosshair(event.x, event.y)
@@ -887,6 +925,16 @@ class AnnotationCanvas(tk.Canvas):
         if self._mode == CanvasMode.PANNING:
             self._on_pan_end(event)
             return
+
+        if self._video_mode:
+            start = self._video_click_start
+            self._video_click_start = None
+            # 按下和松开均在画面内且未拖动，才视为播放控制单击。
+            if (start is not None and self._video_frame_contains(event.x, event.y)
+                    and math.hypot(event.x - start[0], event.y - start[1])
+                    <= VIDEO_CLICK_DRAG_THRESHOLD and self._on_video_toggle_play):
+                self._on_video_toggle_play()
+            return 'break'
         
         if not self._current_image:
             self._mode = CanvasMode.IDLE

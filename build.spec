@@ -2,7 +2,11 @@
 """PyInstaller spec — single-file Windows GUI build."""
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
+# ==================== 打包参数设置区 ====================
+# 随程序分发视频编码器，使导出不依赖用户额外配置系统 FFmpeg。
+video_encoder_data = collect_data_files('imageio_ffmpeg')
 block_cipher = None
 root = Path(SPECPATH)
 icon_file = root / 'app.ico'
@@ -11,7 +15,7 @@ a = Analysis(
     ['main.py'],
     pathex=[str(root)],
     binaries=[],
-    datas=[],
+    datas=video_encoder_data,
     hiddenimports=[
         'PIL._tkinter_finder',
         'yaml',

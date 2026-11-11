@@ -11,6 +11,7 @@ from typing import Callable, List
 
 
 from core.image_item import ImageItem
+from core.video_item import VIDEO_ENTRY_PREFIX
 
 from utils.constants import (
 
@@ -19,6 +20,9 @@ from utils.constants import (
     UI_ACCENT, UI_BORDER, UI_PANEL_BG,
 
 )
+
+# ==================== 视频列表参数设置区 ====================
+VIDEO_ROW_FONT = ('Microsoft YaHei UI', 9)
 
 
 
@@ -102,7 +106,9 @@ class ThumbnailPanel(tk.Frame):
                  path_formatter: Callable[[ImageItem], str] = None,
                  on_context_menu: Callable[[int, object], None] = None,
                  on_prev_image: Callable[[], None] = None,
-                 on_next_image: Callable[[], None] = None):
+                 on_next_image: Callable[[], None] = None,
+                 on_video_selected: Callable[[], None] = None,
+                 on_video_context_menu: Callable = None):
         super().__init__(parent, bg=UI_SURFACE_BG, bd=0,
                          highlightthickness=1, highlightbackground=UI_BORDER)
 
@@ -110,6 +116,9 @@ class ThumbnailPanel(tk.Frame):
         self._on_context_menu = on_context_menu
         self._on_prev_image = on_prev_image
         self._on_next_image = on_next_image
+        self._on_video_selected = on_video_selected
+        self._on_video_context_menu = on_video_context_menu
+        self._video_path = ''
 
         self._path_formatter = path_formatter or (lambda item: item.name)
 
@@ -170,6 +179,25 @@ class ThumbnailPanel(tk.Frame):
         self._list_frame = tk.Frame(self, bg=UI_SURFACE_BG, bd=0)
 
         self._list_frame.pack(fill='both', expand=True, padx=2, pady=(0, 4))
+
+        # 视频固定在图片列表上方，使用独立行避免改变图片的索引和批量选择。
+        self._video_row = tk.Frame(self, bg=UI_SURFACE_BG)
+        self._video_listbox = tk.Listbox(
+            self._video_row, height=1, font=VIDEO_ROW_FONT,
+            bg=UI_SURFACE_BG, fg=UI_TEXT_COLOR, selectbackground=UI_ACCENT,
+            selectforeground='white', exportselection=False, activestyle='none',
+            relief='flat', bd=0, highlightthickness=0,
+        )
+        self._video_listbox.pack(fill='x')
+        self._video_scroll = ttk.Scrollbar(
+            self._video_row, orient='horizontal', command=self._video_listbox.xview,
+        )
+        self._video_scroll.pack(fill='x')
+        self._video_listbox.configure(xscrollcommand=self._video_scroll.set)
+        self._video_listbox.bind('<<ListboxSelect>>', self._on_video_select)
+        self._video_listbox.bind('<Button-3>', self._on_video_right_click)
+        self._video_listbox.bind('<Motion>', self._on_video_motion)
+        self._video_listbox.bind('<Leave>', self._on_list_leave)
 
         self._list_frame.grid_rowconfigure(0, weight=1)
         self._list_frame.grid_rowconfigure(1, weight=0)
@@ -437,6 +465,46 @@ class ThumbnailPanel(tk.Frame):
 
         self._path_formatter = formatter
 
+    def set_video(self, path: str, selected=True):
+        """显示单个视频路径，保留原有图片行和索引映射。"""
+        self._video_path = path
+        self._video_listbox.delete(0, 'end')
+        self._video_listbox.insert('end', VIDEO_ENTRY_PREFIX + path)
+        self._video_row.pack(fill='x', before=self._list_frame, padx=2, pady=(0, 4))
+        self.select_video(selected)
+
+    def clear_video(self):
+        self._video_path = ''
+        self._video_row.pack_forget()
+        self._video_listbox.delete(0, 'end')
+        self._path_tooltip.hide()
+
+    def select_video(self, selected):
+        if not self._video_path:
+            return
+        self._video_listbox.selection_clear(0, 'end')
+        self._video_listbox.itemconfigure(
+            0, bg=UI_ACCENT if selected else UI_SURFACE_BG,
+            fg='white' if selected else UI_TEXT_COLOR,
+        )
+        if selected:
+            self._video_listbox.selection_set(0)
+            self._listbox.selection_clear(0, 'end')
+            self._set_row_style(self._styled_index, False)
+            self._styled_index = -1
+
+    def _on_video_select(self, event=None):
+        if self._video_listbox.curselection() and self._on_video_selected:
+            self._on_video_selected()
+
+    def _on_video_right_click(self, event):
+        if self._video_path and self._on_video_context_menu:
+            self._on_video_context_menu(event)
+            return 'break'
+
+    def _on_video_motion(self, event):
+        self._path_tooltip.show(event.x_root, event.y_root, self._video_path)
+
 
 
     def clear(self):
@@ -591,6 +659,7 @@ class ThumbnailPanel(tk.Frame):
             index = selection[-1]
 
         if 0 <= index < len(self._image_list):
+            self.select_video(False)
             self._current_index = index
             self._refresh_row_styles()
 
@@ -635,6 +704,8 @@ class ThumbnailPanel(tk.Frame):
     def set_current(self, index: int):
 
         """Highlight and scroll to the current image."""
+
+        self.select_video(False)
 
         self._current_index = index
 
