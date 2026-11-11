@@ -19,6 +19,11 @@ from io_ops.folder_labels import save_labels_txt
 VIDEO_SLIDER_UNITS = 1000
 LOG_LINE_LIMIT = 200
 BOX_COLUMNS = ('id', 'class', 'conf', 'coords')
+# 统一采用逻辑像素，保持高分屏下的文字清晰与列表密度。
+IMAGE_ROW_HEIGHT = 26
+CLASS_ROW_HEIGHT = 26
+BOX_ROW_HEIGHT = 26
+REFRESH_BUTTON_SIZE = (66, 26)
 
 
 def section(title, subtitle=None):
@@ -90,7 +95,7 @@ class ImageListModel(QAbstractListModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             return str(item.path)
         if role == Qt.ItemDataRole.SizeHintRole:
-            return QSize(120, 38)
+            return QSize(120, IMAGE_ROW_HEIGHT)
         if role == Qt.ItemDataRole.ForegroundRole and item.manual_annotation_status == 'uncertain':
             return QColor(theme_color('uncertain', self.owner.app._config.ui_theme))
         return None
@@ -125,6 +130,9 @@ class ThumbnailPanel(QFrame):
         self.count.setObjectName('muted')
         title = section('媒体资源', 'LIBRARY')
         self.refresh_button = QToolButton()
+        self.refresh_button.setObjectName('compact')
+        self.refresh_button.setFixedSize(*REFRESH_BUTTON_SIZE)
+        self.refresh_button.setIconSize(QSize(16, 16))
         set_button_icon(self.refresh_button, 'refresh')
         self.refresh_button.setText('刷新')
         self.refresh_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -253,10 +261,12 @@ class LabelPanel(QFrame):
         layout.setContentsMargins(14, 16, 14, 12)
         layout.addLayout(section('标签类别', 'CLASSES'))
         self.search = QLineEdit()
+        self.search.setToolTip('搜索标签类别或备注（S）')
         self.search.setPlaceholderText('搜索类别或中文备注…')
         self.search.textChanged.connect(lambda: self.refresh())
         layout.addWidget(self.search)
         self.list = QListWidget()
+        self.list.setUniformItemSizes(True)
         self.list.currentRowChanged.connect(self.select_class)
         self.list.itemDoubleClicked.connect(lambda item: self.edit_note())
         layout.addWidget(self.list, 1)
@@ -280,8 +290,10 @@ class LabelPanel(QFrame):
         for index, label in enumerate(self._visible_labels):
             note = self.app._label_note_store.get(label.name)
             item = QListWidgetItem(f'●  {label.class_id:02d}   {label.name}' + (f'  ·  {note}' if note else ''))
+            item.setSizeHint(QSize(100, CLASS_ROW_HEIGHT))
             item.setForeground(QColor(label.color))
-            item.setToolTip('双击编辑中文备注')
+            shortcut = f'；快捷选择：{label.class_id + 1}' if 0 <= label.class_id < 9 else ''
+            item.setToolTip(f'{label.name}：双击编辑中文备注{shortcut}')
             self.list.addItem(item)
             if label.class_id == current:
                 self.list.setCurrentRow(index)
@@ -372,6 +384,8 @@ class BoxListPanel(QFrame):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().hide()
+        self.table.verticalHeader().setMinimumSectionSize(22)
+        self.table.verticalHeader().setDefaultSectionSize(BOX_ROW_HEIGHT)
         self.table.setShowGrid(False)
         widths = app._config.box_list_column_widths
         for i, key in enumerate(BOX_COLUMNS):
@@ -442,6 +456,7 @@ class ThresholdSlider(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
         heading = QLabel('置信度阈值')
+        heading.setObjectName('sectionTitle')
         layout.addWidget(heading)
         self.value = QLabel(f'{app._threshold:.2f}')
         self.value.setObjectName('badge')

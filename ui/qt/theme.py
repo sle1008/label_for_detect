@@ -15,6 +15,8 @@ ACCENT = '#5d91ff'
 BORDER = '#2b3442'
 FONT_FAMILY = 'Microsoft YaHei UI'
 FONT_SIZE = 10
+SELECTION_BACKGROUND = '#3b65a0'
+SELECTION_TEXT = '#ffffff'
 ASSET_DIRECTORY = Path(__file__).resolve().parent / 'assets'
 THEME_COLORS = {
     'dark': {'background': BACKGROUND, 'surface': SURFACE, 'text': TEXT, 'muted': MUTED,
@@ -60,6 +62,8 @@ QPushButton#primary { background: #477df0; color: white; border-color: #6496ff; 
 QPushButton#primary:hover { background: #5b8df7; }
 QPushButton#danger { color: #ff939b; background: #3c242d; border-color: #63343f; }
 QPushButton:disabled, QToolButton:disabled { color: #586578; background: #191f28; border-color: #26303d; }
+QFrame#commands QPushButton { padding: 6px 8px; }
+QToolButton#compact { padding: 2px 6px; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #121720; border: 1px solid #344052;
     border-radius: 6px; padding: 7px 10px; selection-background-color: #355a96; }
 QLineEdit:focus, QComboBox:focus { border-color: #5d91ff; }
@@ -67,12 +71,12 @@ QComboBox::drop-down { border: none; width: 24px; }
 QComboBox QAbstractItemView { background: #222a35; selection-background-color: #334f7b; }
 QListView, QTableView, QTreeView { background: transparent; border: none; outline: none;
     selection-background-color: #2c456c; selection-color: #edf4ff; alternate-background-color: #1c232d; }
-QListView::item { padding: 8px 7px; border-radius: 5px; }
+QListView::item { padding: 3px 7px; border-radius: 4px; }
 QListView::item:hover { background: #252f3d; }
 QListView::item:selected { background: #2c456c; border-left: 2px solid #78a4ff; }
-QTableView::item { padding: 6px; border-bottom: 1px solid #242d39; }
+QTableView::item { padding: 3px 6px; border-bottom: 1px solid #242d39; }
 QHeaderView { background: #1e2631; }
-QHeaderView::section { background: #1e2631; color: #8e9caf; border: none; padding: 8px; font-size: 11px; }
+QHeaderView::section { background: #1e2631; color: #8e9caf; border: none; padding: 6px; font-size: 11px; }
 QTableCornerButton::section { background: #1e2631; border: none; }
 QMenuBar { background: #101318; color: #8e9caf; padding: 3px 8px; }
 QMenuBar::item:selected { background: #2c3c54; color: #ffffff; border-radius: 4px; }
@@ -114,6 +118,13 @@ def apply_theme(application, theme):
     theme = theme if theme in THEME_COLORS else 'dark'
     application.setProperty('annotationTheme', theme)
     stylesheet = re.sub(r'#[0-9a-fA-F]{6}', lambda match: LIGHT_COLORS.get(match[0], match[0]), STYLESHEET) if theme == 'light' else STYLESHEET
+    # 选中态使用独立色值，避免主题映射造成白字与浅色背景对比不足。
+    stylesheet += f'''
+QListView, QTableView, QTreeView, QComboBox QAbstractItemView, QLineEdit, QTextEdit, QPlainTextEdit {{
+    selection-background-color: {SELECTION_BACKGROUND}; selection-color: {SELECTION_TEXT}; }}
+QListView::item:selected, QTableView::item:selected, QTreeView::item:selected,
+QMenu::item:selected, QMenuBar::item:selected, QPushButton:checked, QToolButton:checked {{
+    background: {SELECTION_BACKGROUND}; color: {SELECTION_TEXT}; }}'''
     arrow = (ASSET_DIRECTORY / f'chevron-{theme}.svg').as_posix()
     stylesheet += f'''QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 10px; }}
 QToolButton#filter::menu-indicator {{ image: url("{arrow}"); }}
@@ -125,8 +136,8 @@ QLabel#ready {{ color: {theme_color('success', theme)}; font-size: 10px; }}'''
                        (QPalette.ColorRole.WindowText, 'text'), (QPalette.ColorRole.Text, 'text'),
                        (QPalette.ColorRole.ButtonText, 'text'), (QPalette.ColorRole.Button, 'surface')]:
         palette.setColor(role, QColor(theme_color(name, theme)))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor('#477df0'))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#ffffff'))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(SELECTION_BACKGROUND))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(SELECTION_TEXT))
     application.setPalette(palette)
     application.setStyleSheet(stylesheet)
     for widget in application.allWidgets():

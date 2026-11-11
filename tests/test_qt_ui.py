@@ -132,6 +132,36 @@ class QtWorkbenchTests(unittest.TestCase):
         self.drag(self.canvas_point(100, 100), self.canvas_point(130, 120))
         self.assertAlmostEqual(box.x2, 130, delta=2)
 
+    def test_box_navigation_buttons_keep_selection_and_video_read_only(self):
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(10, 10, 35, 35, 0, 'deer'), BBox(60, 40, 95, 80, 1, 'person')]
+        self.app._box_list_panel.refresh()
+        buttons = {b.text(): b for b in self.app._toolbar.findChildren(QPushButton)}
+        buttons['后框'].click()
+        self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
+        buttons['后框'].click()
+        self.assertEqual(item.get_selected_annotations(), [item.annotations[1]])
+        buttons['前框'].click()
+        self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
+        self.assertEqual({i.row() for i in self.app._box_list_panel.table.selectedIndexes()}, {0})
+        # 视频预览期间前后框操作不能改变隐藏图片的选择或标注数据。
+        self.open_video()
+        buttons['后框'].click()
+        buttons['前框'].click()
+        self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
+
+    def test_open_directory_shortcut_matches_menu_and_refresh_keeps_directory(self):
+        with patch.object(self.app, '_open_directory') as open_directory:
+            self.app._setup_shortcuts()
+            QTest.keyClick(self.app._canvas, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+            open_directory.assert_called_once()
+        self.load_images()
+        with patch.object(self.app, '_refresh_list') as refresh:
+            self.app._setup_shortcuts()
+            QTest.keyClick(self.app._canvas, Qt.Key.Key_F5)
+            refresh.assert_called_once()
+
     def test_rotation_mouse_mapping_and_image_shortcuts(self):
         self.load_images()
         canvas = self.app._canvas

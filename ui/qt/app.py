@@ -4,12 +4,12 @@ import queue
 import re
 import sys
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, QSize, QRect, QPoint
 from PySide6.QtGui import QFont, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QToolButton, QSplitter, QLineEdit, QTextEdit, QPlainTextEdit,
-    QComboBox, QAbstractSpinBox, QSizePolicy, QSlider,
+    QComboBox, QAbstractSpinBox, QSizePolicy, QSlider, QLayout,
 )
 from ui.qt.controller import ApplicationController
 from ui.qt.state import initialize_state
@@ -19,6 +19,7 @@ from ui.qt.panels import (ThumbnailPanel, LabelPanel, BoxListPanel, ThresholdSli
 from ui.qt.theme import FONT_FAMILY, FONT_SIZE, icon, apply_theme, set_button_icon
 from ui.qt.dialogs import showerror
 from utils.paths import get_icon_path
+from utils.dpi import configure_ui_dpi
 from io_ops.pre_annotator import DEFAULT_INFERENCE_MODE, INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS
 
 # ==================== 工作台参数设置区 ====================
@@ -26,6 +27,7 @@ DEFAULT_WINDOW_SIZE = (1600, 960)
 MINIMUM_WINDOW_SIZE = (1100, 680)
 DEFAULT_PANE_WIDTHS = (270, 940, 350)
 MAIN_QUEUE_INTERVAL_MS = 16
+COMMAND_BUTTON_SPACING = 5
 INPUT_WIDGET_TYPES = (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox, QSlider)
 INPUT_GLOBAL_SHORTCUTS = {'Ctrl+S', 'Ctrl+Shift+S', 'Ctrl+O', 'Ctrl+Shift+O', 'Ctrl+G'}
 _application = None
@@ -33,10 +35,68 @@ _application = None
 
 def ensure_application():
     global _application
+    configure_ui_dpi('modern')
     _application = QApplication.instance() or QApplication(sys.argv[:1])
     _application.setStyle('Fusion')
     _application.setFont(QFont(FONT_FAMILY, FONT_SIZE))
     return _application
+
+
+class FlowLayout(QLayout):
+    """按可用宽度自动换行，让带文字的操作按钮在窄窗口中仍完整可见。"""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(COMMAND_BUTTON_SPACING)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < self.count() else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < self.count() else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QRect(0, 0, width, 0), measure=True)
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect)
+
+    def _arrange(self, rect, measure=False):
+        x, y, row_height = rect.x(), rect.y(), 0
+        for item in self._items:
+            size = item.sizeHint()
+            if x > rect.x() and x + size.width() > rect.right() + 1:
+                x = rect.x()
+                y += row_height + self.spacing()
+                row_height = 0
+            if not measure:
+                item.setGeometry(QRect(QPoint(x, y), size))
+            x += size.width() + self.spacing()
+            row_height = max(row_height, size.height())
+        return y + row_height - rect.y()
 
 
 class CommandBar(QFrame):
@@ -44,33 +104,38 @@ class CommandBar(QFrame):
         super().__init__()
         self.app = app
         self._batch_running = False
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 8)
-        for text, graphic, action in [('撤回（Ctrl+Z）', 'undo', app._undo), ('重做（Ctrl+Y）', 'redo', app._redo),
-                                      ('删除选中标注（Delete）', 'trash', app._delete_selected),
-                                      ('适应窗口（F）', 'fit', app._fit_window), ('旋转 180°（R）', 'rotate', app._rotate_current_image),
-                                      ('切换标签显示（T）', 'label', app._cycle_label_mode)]:
+        self.setObjectName('commands')
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout = FlowLayout(self)
+        for text, graphic, tooltip, action in [
+            ('撤回', 'undo', '撤回（Ctrl+Z）', app._undo),
+            ('重做', 'redo', '重做（Ctrl+Y）', app._redo),
+            ('删除', 'trash', '删除选中标注（Delete）', app._delete_selected),
+            ('前框', 'prev', '选择前一个标注框（Q）', app._prev_bbox),
+            ('后框', 'next', '选择后一个标注框（E）', app._next_bbox),
+            ('适应', 'fit', '适应窗口（F）', app._fit_window),
+            ('旋转', 'rotate', '旋转 180°（R）', app._rotate_current_image),
+            ('标签', 'label', '切换标签显示（T）', app._cycle_label_mode),
+        ]:
             button = QPushButton(text)
             set_button_icon(button, graphic)
-            button.setToolTip(text)
-            button.setAccessibleName(text)
-            button.setText('')
-            button.setFixedWidth(36)
+            button.setToolTip(tooltip)
             button.clicked.connect(action)
             layout.addWidget(button)
-        layout.addStretch()
-        self.infer = QPushButton('预标注  Ctrl+X')
+        self.infer = QPushButton('预标注')
         set_button_icon(self.infer, 'spark')
-        self.infer.setObjectName('primary')
+        self.infer.setToolTip('推理当前图片或完整视频（Ctrl+X）')
         self.infer.clicked.connect(app._pre_annotate_current)
         layout.addWidget(self.infer)
         self.batch = QPushButton('批量推理')
+        self.batch.setToolTip('批量推理当前筛选中的图片（Ctrl+Shift+X）')
         self.batch.clicked.connect(lambda: app._stop_batch_pre_annotate() if self._batch_running else app._batch_pre_annotate())
         layout.addWidget(self.batch)
 
     def set_batch_running(self, running):
         self._batch_running = running
         self.batch.setText('停止推理' if running else '批量推理')
+        self.batch.setToolTip('停止批量推理' if running else '批量推理当前筛选中的图片（Ctrl+Shift+X）')
         self.infer.setEnabled(not running)
 
 
@@ -118,35 +183,34 @@ class AnnotationApp(QMainWindow, ApplicationController):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(18, 10, 18, 6)
         layout.setSpacing(12)
-        header = QHBoxLayout()
-        brand = QLabel('ANNOTATE')
-        brand.setObjectName('brand')
-        header.addWidget(brand)
-        badge = QLabel('视觉标注工作台')
-        badge.setObjectName('badge')
-        header.addWidget(badge)
-        self.project_label = QLabel('未打开项目')
-        self.project_label.setObjectName('muted')
-        self.project_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        header.addWidget(self.project_label, 1)
-        for text, graphic, callback, primary in [
-            ('打开目录', 'folder', self._open_directory, False),
-            ('打开视频', 'video', self._open_video, False),
-            ('加载标签', 'label', self._load_label_file, False),
-            ('保存', 'save', self._save_current, True),
-            ('导出数据集', 'export', self._export, False),
-        ]:
-            button = QPushButton(text)
-            set_button_icon(button, graphic)
-            button.clicked.connect(callback)
-            if primary:
-                button.setObjectName('primary')
-            header.addWidget(button)
-        layout.addLayout(header)
+        # 左侧工作区自带操作行；右栏从同一顶部起排，避免被项目标题挤占高度。
         self._paned = QSplitter(Qt.Orientation.Horizontal)
         self._paned.setChildrenCollapsible(False)
         self._paned.setHandleWidth(12)
         layout.addWidget(self._paned, 1)
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        header = QHBoxLayout()
+        for text, graphic, callback, tooltip in [
+            ('打开目录', 'folder', self._open_directory, '选择图片目录（Ctrl+O）'),
+            ('打开视频', 'video', self._open_video, '打开视频（Ctrl+Shift+O）'),
+            ('加载标签', 'label', self._load_label_file, '从文件或目录名称导入标签类别'),
+            ('保存', 'save', self._save_current, '保存当前标注（Ctrl+S）'),
+            ('导出数据集', 'export', self._export, '导出数据集（Ctrl+Shift+S）'),
+        ]:
+            button = QPushButton(text)
+            set_button_icon(button, graphic)
+            button.clicked.connect(callback)
+            button.setToolTip(tooltip)
+            header.addWidget(button)
+        header.addStretch()
+        workspace_layout.addLayout(header)
+        self._workspace_paned = QSplitter(Qt.Orientation.Horizontal)
+        self._workspace_paned.setChildrenCollapsible(False)
+        self._workspace_paned.setHandleWidth(12)
+        workspace_layout.addWidget(self._workspace_paned, 1)
+        self._paned.addWidget(workspace)
         left = QWidget()
         left.setMinimumWidth(220)
         left_layout = QVBoxLayout(left)
@@ -173,12 +237,17 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._thumb_panel = ThumbnailPanel(self)
         left_layout.addWidget(self._thumb_panel, 1)
         navigation = QHBoxLayout()
-        for text, callback in [('‹ 上一张', self._prev_image), ('跳转', self._jump_to_image), ('下一张 ›', self._next_image)]:
+        for text, callback, tooltip in [
+            ('‹ 上一张', self._prev_image, '上一张图片（A / ←）'),
+            ('跳转', self._jump_to_image, '跳转到指定图片（Ctrl+G）'),
+            ('下一张 ›', self._next_image, '下一张图片（D / →）'),
+        ]:
             button = QPushButton(text)
+            button.setToolTip(tooltip)
             button.clicked.connect(callback)
             navigation.addWidget(button)
         left_layout.addLayout(navigation)
-        self._paned.addWidget(left)
+        self._workspace_paned.addWidget(left)
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -199,7 +268,7 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._video_controls = VideoControls(self)
         center_layout.addWidget(self._video_controls)
         self._video_controls.hide()
-        self._paned.addWidget(center)
+        self._workspace_paned.addWidget(center)
         right = QWidget()
         right.setMinimumWidth(310)
         right_layout = QVBoxLayout(right)
@@ -245,15 +314,18 @@ class AnnotationApp(QMainWindow, ApplicationController):
             self._right_paned.setSizes([max(240, saved_sashes[0]), 52, 230])
         right_layout.addWidget(self._right_paned, 1)
         self._paned.addWidget(right)
-        self._paned.setSizes([self._config.left_panel_width or DEFAULT_PANE_WIDTHS[0],
-                              DEFAULT_PANE_WIDTHS[1], self._config.right_panel_width or DEFAULT_PANE_WIDTHS[2]])
-        self._paned.setStretchFactor(1, 1)
+        left_width = self._config.left_panel_width or DEFAULT_PANE_WIDTHS[0]
+        self._workspace_paned.setSizes([left_width, DEFAULT_PANE_WIDTHS[1]])
+        self._workspace_paned.setStretchFactor(1, 1)
+        self._paned.setSizes([left_width + DEFAULT_PANE_WIDTHS[1],
+                              self._config.right_panel_width or DEFAULT_PANE_WIDTHS[2]])
+        self._paned.setStretchFactor(0, 1)
         self._status_bar = StatusBar()
         layout.addWidget(self._status_bar)
 
     def _setup_shortcuts(self):
         self.shortcuts = {
-            'Ctrl+O': self._refresh_list, 'Ctrl+Shift+O': self._open_video,
+            'Ctrl+O': self._open_directory, 'Ctrl+Shift+O': self._open_video,
             'Ctrl+S': self._save_current, 'Ctrl+Shift+S': self._export,
             'Ctrl+Z': self._undo, 'Ctrl+Y': self._redo, 'Ctrl+A': self._select_all,
             'Ctrl+I': self._inverse_select, 'Del': self._delete_selected,
@@ -334,8 +406,6 @@ class AnnotationApp(QMainWindow, ApplicationController):
 
     def title(self, text):
         self.setWindowTitle(text)
-        self.project_label.setText(Path(str(self._project.image_dir)).name if self._project.image_dir else '未打开项目')
-        self.project_label.setToolTip(str(self._project.image_dir or ''))
 
     def saved_window_geometry(self):
         return f'{self.width()}x{self.height()}+{max(0, self.x())}+{max(0, self.y())}'
@@ -345,10 +415,10 @@ class AnnotationApp(QMainWindow, ApplicationController):
         QApplication.sendPostedEvents(None, QEvent.Type.UpdateRequest)
 
     def _current_left_panel_width(self):
-        return self._paned.sizes()[0]
+        return self._workspace_paned.sizes()[0]
 
     def _current_right_panel_width(self):
-        return self._paned.sizes()[2]
+        return self._paned.sizes()[1]
 
     def _current_right_pane_sash_positions(self):
         sizes = self._right_paned.sizes()

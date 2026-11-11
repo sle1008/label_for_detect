@@ -6,6 +6,10 @@ import ctypes
 import argparse
 from pathlib import Path
 
+# ==================== 启动参数设置区 ====================
+_SINGLE_INSTANCE_MUTEX_NAME = r'Local\AnnotationTool.SingleInstance.6F7D94A1'
+_ERROR_ALREADY_EXISTS = 183
+
 # Suppress libpng iCCP warnings from PNGs with bad embedded profiles (harmless).
 class _StderrFilter:
     __slots__ = ('_stream',)
@@ -27,28 +31,12 @@ class _StderrFilter:
 if sys.stderr is not None:
     sys.stderr = _StderrFilter(sys.stderr)
 
-# ==================== 启动参数设置区 ====================
-# Qt 自动处理每屏 DPI；仅兼容入口需要提前设置 Tk 的 DPI 感知。
-try:
-    if '--legacy-ui' in sys.argv:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
-
 # Add project root to path
 from utils.paths import get_app_root
 
 PROJECT_ROOT = get_app_root()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-
-
-_SINGLE_INSTANCE_MUTEX_NAME = r'Local\AnnotationTool.SingleInstance.6F7D94A1'
-_ERROR_ALREADY_EXISTS = 183
 
 
 def _acquire_single_instance(mutex_name: str = _SINGLE_INSTANCE_MUTEX_NAME):

@@ -77,6 +77,7 @@ from ui.widgets import ThresholdSlider
 from ui.window_utils import showinfo, showwarning, showerror, askyesno
 from utils.time_format import format_duration
 from utils.paths import get_icon_path, format_image_display_path
+from utils.dpi import configure_ui_dpi
 from utils.constants import (
     DEFAULT_CONFIDENCE_THRESHOLD, UI_BG_COLOR, UI_PANEL_BG,
     UI_SURFACE_BG, UI_TEXT_COLOR, UI_BORDER, UI_TOOLBAR_BG, UI_ACCENT,
@@ -113,6 +114,7 @@ class AnnotationApp(tk.Tk):
     """Main annotation application window."""
     
     def __init__(self):
+        configure_ui_dpi('legacy')
         super().__init__()
         
         self.title('目标检测标注工具')
