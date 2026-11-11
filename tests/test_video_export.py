@@ -150,6 +150,29 @@ class VideoExportAppTests(video_tests.VideoAppFixture):
                                  self.app.update)
         infer.assert_not_called()
 
+    def test_original_video_preview_still_exports_cached_annotation_boxes(self):
+        self.open_video()
+        cache = sample_annotations()
+        self.app._video_item.annotations = cache
+        self.app._video_annotations = cache
+        self.app._play_listed_video(False)
+        output = self.root / 'from_original_preview.mp4'
+        with patch('ui.app.filedialog.asksaveasfilename', return_value=str(output)), \
+                patch.object(self.app._pre_annotator, 'predict_video_async') as infer:
+            self.app._export_video()
+            video_tests.wait_for(lambda: output.is_file() and not self.app._video_export_running,
+                                 self.app.update)
+        infer.assert_not_called()
+        self.assertFalse(self.app._video_show_annotations)
+        self.assertIs(self.app._video_item.annotations, cache)
+        capture = cv2.VideoCapture(str(output))
+        try:
+            ok, frame = capture.read()
+            self.assertTrue(ok)
+            self.assertGreater(int(frame[40, 8, 2]), int(frame[40, 8, 1]) + 70)
+        finally:
+            capture.release()
+
     def test_export_without_cache_automatically_infers_every_frame_first(self):
         self.open_video()
         self.app._pre_annotator._model = Mock(return_value=[])
@@ -304,7 +327,19 @@ class VideoExportAppTests(video_tests.VideoAppFixture):
             with patch('ui.app.tk.Menu') as menu_class:
                 invoke(event)
             labels = [call.kwargs['label'] for call in menu_class.return_value.add_command.call_args_list]
-            self.assertEqual(labels, ['从列表中删除', '删除视频', '推理视频', '导出视频'])
+            self.assertEqual(labels, ['从列表中删除', '删除视频', '上一帧', '下一帧',
+                                      '播放原视频', '推理视频', '导出视频'])
+            commands = {call.kwargs['label']: call.kwargs['command']
+                        for call in menu_class.return_value.add_command.call_args_list}
+            commands['下一帧']()
+            self.assertEqual(self.app._video_frame_index, 1)
+            self.assertFalse(self.app._video_player.playing)
+            commands['上一帧']()
+            self.assertEqual(self.app._video_frame_index, 0)
+            commands['播放原视频']()
+            self.assertFalse(self.app._video_show_annotations)
+            self.assertTrue(self.app._video_player.playing)
+            self.app._toggle_video_play()
 
 
 if __name__ == '__main__':

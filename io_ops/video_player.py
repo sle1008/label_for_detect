@@ -83,12 +83,16 @@ class VideoPlayer:
             self._reset_position(displayed_index)
 
     def seek(self, seconds, playing=None):
+        self.seek_frame(max(0.0, float(seconds)) * self.fps, playing=playing)
+
+    def seek_frame(self, index, playing=None):
+        """直接按帧号定位，逐帧操作无需经过秒数换算和浮点数截断。"""
         with self._condition:
             if self._closed:
                 return
             if playing is not None:
                 self._playing = bool(playing)
-            self._reset_position(max(0.0, float(seconds)) * self.fps)
+            self._reset_position(index)
 
     def set_speed(self, speed, displayed_index):
         if speed not in VIDEO_PLAYBACK_SPEEDS:

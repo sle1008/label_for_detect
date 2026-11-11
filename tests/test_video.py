@@ -7,6 +7,7 @@ import time
 import tkinter as tk
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import cv2
@@ -221,6 +222,16 @@ class VideoPlayerTests(unittest.TestCase):
         self.assertFalse(player.playing)
         self.assertEqual(capture.read_count, 1)
 
+    def test_frame_seek_is_exact_at_fractional_fps_and_clamps_to_video_bounds(self):
+        player, _ = self.make_player(fps=29.97)
+        wait_for(player.take_frame)
+        for requested, expected in ((61, 61), (1000, 99), (-1, 0)):
+            player.seek_frame(requested, playing=False)
+            frame = wait_for(player.take_frame)
+            self.assertEqual(frame.index, expected)
+            self.assertEqual(frame.image.getpixel((0, 0)), (expected,) * 3)
+            self.assertFalse(player.playing)
+
     def test_pause_stops_decoding_and_keeps_displayed_frame(self):
         player, capture = self.make_player()
         wait_for(player.take_frame)
@@ -408,12 +419,89 @@ class VideoAppFixture(VideoFixture):
 
 
 class VideoAppTests(VideoAppFixture):
+    def install_frame_annotations(self):
+        cache = [[BBox(2, 3, 30, 40, 0, f'frame_{index}', 0.87)]
+                 for index in range(TEST_FRAME_COUNT)]
+        self.app._video_annotations = cache
+        self.app._video_item.annotations = cache
+        return cache
+
     def test_open_video_needs_no_weights_and_starts_paused(self):
         self.open_video()
         self.assertFalse(self.app._pre_annotator.is_loaded)
         self.assertFalse(self.app._video_player.playing)
         self.assertIsNone(self.app._video_annotations)
         self.assertEqual(self.app._video_frame_index, 0)
+
+    def test_frame_steps_pause_and_keep_decoded_frame_and_annotations_in_sync(self):
+        self.open_video()
+        self.install_frame_annotations()
+        event = SimpleNamespace(widget=self.app._canvas)
+        self.app._toggle_video_play()
+        for _ in range(5):
+            self.assertEqual(self.app._step_video_shortcut(1, event), 'break')
+        self.assertEqual(self.app._video_frame_index, 5)
+        wait_for(lambda: self.app._canvas._video_annotations
+                 and self.app._canvas._video_annotations[0].class_name == 'frame_5', self.app.update)
+        self.assertAlmostEqual(self.app._canvas._source_pil_image.getpixel((0, 0))[0], 50, delta=2)
+        self.assertFalse(self.app._video_player.playing)
+        self.assertEqual(self.app._video_controls._play_button.cget('text'), '播放')
+        self.app._step_video_shortcut(-1, event)
+        wait_for(lambda: self.app._canvas._video_annotations[0].class_name == 'frame_4', self.app.update)
+        self.assertAlmostEqual(self.app._canvas._source_pil_image.getpixel((0, 0))[0], 40, delta=2)
+
+    def test_frame_steps_stop_at_first_and_last_frames_and_wait_for_inference(self):
+        self.open_video()
+        self.app._step_video_frame(-1)
+        self.assertEqual(self.app._video_frame_index, 0)
+        for _ in range(TEST_FRAME_COUNT + 2):
+            self.app._step_video_frame(1)
+        wait_for(lambda: self.app._canvas._source_pil_image.getpixel((0, 0))[0] >= 188,
+                 self.app.update)
+        self.assertEqual(self.app._video_frame_index, TEST_FRAME_COUNT - 1)
+        self.assertFalse(self.app._video_player.playing)
+        self.app._video_inference_running = True
+        try:
+            self.app._step_video_frame(-1)
+            self.app._play_listed_video(False)
+            self.assertEqual(self.app._video_frame_index, TEST_FRAME_COUNT - 1)
+            self.assertTrue(self.app._video_show_annotations)
+        finally:
+            self.app._video_inference_running = False
+
+    def test_video_step_shortcuts_ignore_image_mode_and_text_inputs(self):
+        event = SimpleNamespace(widget=self.app._canvas)
+        with patch.object(self.app, '_step_video_frame') as step:
+            self.assertIsNone(self.app._step_video_shortcut(1, event))
+        step.assert_not_called()
+        self.open_video()
+        entry = tk.Entry(self.app)
+        self.addCleanup(entry.destroy)
+        with patch.object(self.app, '_step_video_frame') as step:
+            self.assertIsNone(self.app._step_video_shortcut(1, SimpleNamespace(widget=entry)))
+        step.assert_not_called()
+
+    def test_play_original_preserves_cache_and_can_return_to_annotated_playback(self):
+        self.open_video()
+        cache = self.install_frame_annotations()
+        self.app._step_video_frame(3)
+        wait_for(lambda: self.app._canvas._video_annotations
+                 and self.app._canvas._video_annotations[0].class_name == 'frame_3', self.app.update)
+        with patch.object(self.app._pre_annotator, 'predict_video_async') as infer:
+            self.app._play_listed_video(False)
+            self.assertTrue(self.app._video_player.playing)
+            self.assertEqual(self.app._canvas._video_annotations, [])
+            self.app._toggle_video_play()
+            self.app._step_video_frame(1)
+            wait_for(lambda: self.app._canvas._source_pil_image.getpixel((0, 0))[0] >= 38,
+                     self.app.update)
+            self.assertEqual(self.app._canvas._video_annotations, [])
+            self.assertIs(self.app._video_item.annotations, cache)
+            self.app._play_listed_video(True)
+            wait_for(lambda: bool(self.app._canvas._video_annotations), self.app.update)
+        infer.assert_not_called()
+        self.assertTrue(self.app._video_show_annotations)
+        self.assertIs(self.app._video_item.annotations, cache)
 
     def test_clicking_video_toggles_play_and_pause_and_respects_inference(self):
         self.app.geometry('1100x700+20000+20000')

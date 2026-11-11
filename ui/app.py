@@ -93,6 +93,9 @@ VIDEO_FRAME_POLL_MS = 15
 VIDEO_FILETYPES = [('视频文件', '*.mp4 *.avi *.mov *.mkv *.wmv *.m4v'), ('所有文件', '*.*')]
 VIDEO_SUPPORTED_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
 VIDEO_DELETE_JOIN_SECONDS = 5.0
+# 视频逐帧键独立于图片导航，输入控件中保留标点输入的原有含义。
+VIDEO_FRAME_SHORTCUTS = (('comma', -1), ('period', 1))
+VIDEO_SHORTCUT_INPUT_CLASSES = {'Entry', 'TEntry', 'Text', 'TCombobox', 'Spinbox', 'TSpinbox'}
 # 图片显示方向的快捷键，便于在画布聚焦时快速操作。
 ROTATE_IMAGE_SHORTCUT = 'r'
 
@@ -175,6 +178,7 @@ class AnnotationApp(tk.Tk):
         self._video_seek_active = False
         self._video_resume_after_seek = False
         self._video_annotations = None
+        self._video_show_annotations = True
         self._video_inference_running = False
         self._video_inference_stop_event = None
         self._video_error_reported = False
@@ -1335,6 +1339,8 @@ class AnnotationApp(tk.Tk):
         self.bind('<Escape>', lambda e: self._canvas.cancel_or_deselect())
         self.bind('<Control-x>', lambda e: self._pre_annotate_current())
         self.bind('<Control-X>', lambda e: self._batch_pre_annotate())
+        for key, delta in VIDEO_FRAME_SHORTCUTS:
+            self.bind(f'<{key}>', lambda e, step=delta: self._step_video_shortcut(step, e))
         
         # Q/E for prev/next annotation box
         self.bind('<q>', lambda e: self._prev_bbox())
@@ -2838,6 +2844,17 @@ class AnnotationApp(tk.Tk):
             or self._pending_video_generation is not None else 'normal',
         )
         menu.add_separator()
+        playback_state = 'disabled' if self._video_inference_running or self._video_delete_running else 'normal'
+        menu.add_command(label='上一帧', accelerator=',', state=playback_state,
+                         command=lambda: self._step_listed_video(-1))
+        menu.add_command(label='下一帧', accelerator='.', state=playback_state,
+                         command=lambda: self._step_listed_video(1))
+        menu.add_command(label='播放原视频', state=playback_state,
+                         command=lambda: self._play_listed_video(False))
+        if self._video_item.annotations is not None and not self._video_show_annotations:
+            menu.add_command(label='播放标注视频', state=playback_state,
+                             command=lambda: self._play_listed_video(True))
+        menu.add_separator()
         menu.add_command(label='推理视频', command=self._infer_listed_video,
                          state='disabled' if busy or self._video_delete_running else 'normal')
         menu.add_command(
@@ -3028,11 +3045,14 @@ class AnnotationApp(tk.Tk):
             self._canvas.show_video_frame(result.image, annotations)
             self._video_controls.set_position(position)
             if not self._video_inference_running and not self._video_export_running:
-                state = '推理完成' if self._video_annotations is not None else '未推理，按 Ctrl+X'
+                state = ('原视频' if not self._video_show_annotations else
+                         '推理完成' if self._video_annotations is not None else '未推理，按 Ctrl+X')
+                count = str(self._video_frame_count) if self._video_frame_count else '?'
                 self._status_bar.set_overlay(
                     f'视频: {Path(self._video_path).name} | {result.image.width}x{result.image.height} | '
                     f'{self._video_controls._format_time(position)} / '
                     f'{self._video_controls._format_time(self._video_duration)} | '
+                    f'帧: {result.index + 1}/{count} | '
                     f'{state} | 检测框: {len(annotations)} | {self._video_speed:g}x'
                 )
         playing = player.playing
@@ -3046,8 +3066,54 @@ class AnnotationApp(tk.Tk):
 
     def _video_annotations_for_frame(self, index):
         """检测框与解码画面通过原始帧号对应，空帧也占用缓存位置。"""
+        if not self._video_show_annotations:
+            return []
         cache = self._video_annotations
         return cache[index] if cache is not None and 0 <= index < len(cache) else []
+
+    def _step_video_shortcut(self, delta, event):
+        if not self._video_path or event.widget.winfo_class() in VIDEO_SHORTCUT_INPUT_CLASSES:
+            return
+        self._step_video_frame(delta)
+        return 'break'
+
+    def _step_listed_video(self, delta):
+        self._ensure_listed_video_active(lambda: self._step_video_frame(delta))
+
+    def _step_video_frame(self, delta):
+        """逐帧操作总是暂停；连续按键以最近请求的帧号累加，不丢失步数。"""
+        player = self._video_player
+        if player is None or self._video_inference_running:
+            return
+        target = max(0, self._video_frame_index + delta)
+        if self._video_frame_count:
+            target = min(target, self._video_frame_count - 1)
+        self._video_seek_active = False
+        self._video_resume_after_seek = False
+        self._video_frame_index = target
+        player.seek_frame(target, playing=False)
+        self._video_playing = False
+        self._video_controls.set_playing(False)
+        self._video_controls.set_position(target / player.fps)
+
+    def _play_listed_video(self, show_annotations):
+        self._ensure_listed_video_active(lambda: self._play_video_view(show_annotations))
+
+    def _play_video_view(self, show_annotations):
+        """仅切换预览叠加；原视频播放和带框导出共用已完成的推理缓存。"""
+        player = self._video_player
+        if player is None or self._video_inference_running:
+            return
+        self._video_show_annotations = show_annotations
+        if (not show_annotations and self._canvas._video_mode
+                and self._canvas._source_pil_image is not None):
+            self._canvas.show_video_frame(self._canvas._source_pil_image, [])
+        self._video_seek_active = False
+        self._video_resume_after_seek = False
+        player.play(self._video_frame_index)
+        self._video_playing = player.playing
+        self._video_controls.set_playing(self._video_playing)
+        self._status_bar.info('正在播放标注视频' if show_annotations else '正在播放原视频（不显示推理标注）')
 
     def _toggle_video_play(self):
         player = self._video_player
@@ -3118,6 +3184,7 @@ class AnnotationApp(tk.Tk):
         self._video_seek_active = False
         self._video_resume_after_seek = False
         self._video_annotations = None
+        self._video_show_annotations = True
         self._video_frame_count = 0
         self._video_frame_index = 0
         self._video_error_reported = False
@@ -3886,6 +3953,7 @@ class AnnotationApp(tk.Tk):
                 self._status_bar.error(f'视频推理失败: {result.error}')
                 return
             self._video_annotations = result.annotations
+            self._video_show_annotations = True
             if item is not None:
                 item.annotations = result.annotations
                 item.fps = player.fps
@@ -4102,6 +4170,7 @@ class AnnotationApp(tk.Tk):
 ═══════════════════════════
 Ctrl+O      打开目录
 Ctrl+Shift+O 打开视频
+, / .       视频上一帧/下一帧（暂停在目标帧）
 Ctrl+S      保存
 Ctrl+Shift+S 导出
 Ctrl+Z      撤销（先当前图编辑，再恢复上一张图）
