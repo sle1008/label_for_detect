@@ -15,8 +15,9 @@ ACCENT = '#5d91ff'
 BORDER = '#2b3442'
 FONT_FAMILY = 'Microsoft YaHei UI'
 FONT_SIZE = 10
-SELECTION_BACKGROUND = '#3b65a0'
+SELECTION_BACKGROUND = '#4b78b4'
 SELECTION_TEXT = '#ffffff'
+CLASS_LIST_FONT_SIZE = 14
 ASSET_DIRECTORY = Path(__file__).resolve().parent / 'assets'
 THEME_COLORS = {
     'dark': {'background': BACKGROUND, 'surface': SURFACE, 'text': TEXT, 'muted': MUTED,
@@ -81,7 +82,7 @@ QTableCornerButton::section { background: #1e2631; border: none; }
 QMenuBar { background: #101318; color: #8e9caf; padding: 3px 8px; }
 QMenuBar::item:selected { background: #2c3c54; color: #ffffff; border-radius: 4px; }
 QMenu { background: #202733; border: 1px solid #3a4659; padding: 6px; }
-QMenu::item { padding: 8px 28px 8px 12px; border-radius: 4px; }
+QMenu::item { padding: 5px 28px 5px 12px; border-radius: 4px; }
 QMenu::item:selected { background: #34527f; }
 QMenu::item:disabled { color: #596779; }
 QMenu::separator { height: 1px; background: #354154; margin: 5px; }
@@ -120,6 +121,7 @@ def apply_theme(application, theme):
     stylesheet = re.sub(r'#[0-9a-fA-F]{6}', lambda match: LIGHT_COLORS.get(match[0], match[0]), STYLESHEET) if theme == 'light' else STYLESHEET
     # 选中态使用独立色值，避免主题映射造成白字与浅色背景对比不足。
     stylesheet += f'''
+QListWidget#classList {{ font-size: {CLASS_LIST_FONT_SIZE}px; }}
 QListView, QTableView, QTreeView, QComboBox QAbstractItemView, QLineEdit, QTextEdit, QPlainTextEdit {{
     selection-background-color: {SELECTION_BACKGROUND}; selection-color: {SELECTION_TEXT}; }}
 QListView::item:selected, QTableView::item:selected, QTreeView::item:selected,

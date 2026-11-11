@@ -108,8 +108,8 @@ class CommandBar(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = FlowLayout(self)
         for text, graphic, tooltip, action in [
-            ('前框', 'prev', '选择前一个标注框（Q）', app._prev_bbox),
-            ('后框', 'next', '选择后一个标注框（E）', app._next_bbox),
+            ('前框 (Q)', 'prev', '选择前一个标注框（Q）', app._prev_bbox),
+            ('后框 (E)', 'next', '选择后一个标注框（E）', app._next_bbox),
             ('撤回', 'undo', '撤回（Ctrl+Z）', app._undo),
             ('重做', 'redo', '重做（Ctrl+Y）', app._redo),
             ('删除', 'trash', '删除选中标注（Delete）', app._delete_selected),

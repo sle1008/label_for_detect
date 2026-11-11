@@ -6,6 +6,7 @@ from typing import Dict, Optional, Sequence
 
 from core.image_item import ImageItem
 
+# ==================== 标注状态参数设置区 ====================
 STATUS_FILENAME = '.annotation_status.json'
 
 IMAGE_CATEGORY_ANNOTATED = 'annotated'
@@ -20,7 +21,7 @@ IMAGE_FOLDER_NAMES = frozenset({'images', 'image', 'imgs', 'img'})
 ANNOTATION_STATUS_EXTENSIONS = ('.txt', '.xml')
 
 
-def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
+def candidate_annotation_txt_paths(image_path: Path, inspect_files: bool = True) -> list[Path]:
     """Return possible YOLO label paths for an image, ordered by preference."""
     stem_txt = image_path.stem + '.txt'
     paths = [image_path.with_suffix('.txt')]
@@ -54,7 +55,8 @@ def candidate_annotation_txt_paths(image_path: Path) -> list[Path]:
     unique_paths = []
     seen = set()
     for path in paths:
-        key = path.resolve() if path.exists() else path.absolute()
+        # 批量目录索引自行检查文件，路径推导时可跳过重复的磁盘访问。
+        key = path.resolve() if inspect_files and path.exists() else path.absolute()
         if key not in seen:
             seen.add(key)
             unique_paths.append(path)

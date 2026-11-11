@@ -3,11 +3,13 @@
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from types import ModuleType, SimpleNamespace
 
+# ==================== 核心回归参数设置区 ====================
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -596,6 +598,28 @@ class ImageExportTests(unittest.TestCase):
 
 
 class ProjectScanTests(unittest.TestCase):
+    def test_preview_reports_64_discovered_images_before_global_sort(self):
+        from core.project import DIRECTORY_PREVIEW_COUNT
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(DIRECTORY_PREVIEW_COUNT):
+                (root / f'z_{index:03d}.jpg').write_bytes(b'1')
+            nested = root / 'nested'
+            nested.mkdir()
+            (nested / 'a_later.png').write_bytes(b'1')
+            previews = []
+            paths = Project.scan_image_paths(str(root), on_preview=previews.append)
+            self.assertEqual(len(previews), 1)
+            self.assertEqual(len(previews[0]), DIRECTORY_PREVIEW_COUNT)
+            self.assertTrue(all(path.name.startswith('z_') for path in previews[0]))
+            self.assertEqual(paths[0].name, 'a_later.png')
+            self.assertEqual(len(paths), DIRECTORY_PREVIEW_COUNT + 1)
+            cancelled = threading.Event()
+            self.assertEqual(Project.scan_image_paths(
+                str(root), on_preview=lambda paths: cancelled.set(),
+                is_cancelled=cancelled.is_set,
+            ), [])
+
     def test_scan_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

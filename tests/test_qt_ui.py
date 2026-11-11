@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -22,7 +23,7 @@ VIDEO_FRAME_COUNT = 12
 VIDEO_FPS = 20
 
 from core.annotation import BBox
-from core.project import ImageFilter
+from core.project import ImageFilter, Project, DIRECTORY_PREVIEW_COUNT
 from io_ops.annotation_status import preferred_annotation_txt_path
 from ui.qt.app import AnnotationApp, ensure_application
 from ui.qt.bridge import Menu
@@ -107,6 +108,135 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(self.app._project.current_index, 0)
         self.assertEqual(self.app._label_panel.list.count(), 2)
 
+    def test_directory_preview_does_not_block_ui_and_prepares_model_in_background(self):
+        from PySide6.QtCore import QTimer
+        for index in range(DIRECTORY_PREVIEW_COUNT + 3):
+            Image.new('RGB', (32, 24)).save(self.images / f'preview_{index:03d}.jpg')
+        release = threading.Event()
+        original_check = Project._is_image_file
+        original_index = Project._load_coco_annotation_index
+        checks, index_threads = [], []
+
+        def slow_check(path):
+            checks.append(path)
+            if len(checks) == DIRECTORY_PREVIEW_COUNT + 1:
+                release.wait(WAIT_SECONDS)
+            return original_check(path)
+
+        def record_index(project):
+            index_threads.append(threading.get_ident())
+            return original_index(project)
+
+        with patch.object(Project, '_is_image_file', side_effect=slow_check), \
+                patch.object(Project, '_load_coco_annotation_index', record_index):
+            try:
+                self.app._load_directory(str(self.images))
+                self.wait(lambda: self.app._thumb_panel.model.rowCount() == DIRECTORY_PREVIEW_COUNT)
+                self.assertTrue(self.app._directory_loading)
+                self.assertFalse(self.app._thumb_panel.view.isEnabled())
+                # 后台暂停扫描时，定时器与主题操作仍可处理，预览不会导航到错误序号。
+                ticks = []
+                timer = QTimer(self.app)
+                timer.setInterval(2)
+                timer.timeout.connect(lambda: ticks.append(1))
+                timer.start()
+                self.app._set_theme('light')
+                self.wait(lambda: len(ticks) >= 3)
+                timer.stop()
+            finally:
+                release.set()
+            self.wait(lambda: not self.app._directory_loading and self.app._canvas._current_image is not None)
+        self.assertEqual(self.app._thumb_panel.model.rowCount(), DIRECTORY_PREVIEW_COUNT + 5)
+        self.assertTrue(self.app._thumb_panel.view.isEnabled())
+        self.assertTrue(index_threads)
+        self.assertNotIn(threading.get_ident(), index_threads)
+        self.assertEqual(self.app._label_manager.get_name(0), 'deer')
+        self.assertEqual([item.path for item in self.app._project.image_list],
+                         Project.scan_image_paths(str(self.images)))
+
+    def test_switching_directory_discards_pending_preview_and_scan_result(self):
+        for index in range(DIRECTORY_PREVIEW_COUNT + 3):
+            Image.new('RGB', (32, 24)).save(self.images / f'preview_{index:03d}.jpg')
+        other = self.root / 'other'
+        other.mkdir()
+        Image.new('RGB', (32, 24)).save(other / 'other.jpg')
+        (other / 'classes.txt').write_text('0: fox\n', encoding='utf-8')
+        release, finished = threading.Event(), threading.Event()
+        original_scan = Project.scan_image_paths
+
+        def paused_scan(directory, **kwargs):
+            if directory != str(self.images):
+                return original_scan(directory, **kwargs)
+            paths = original_scan(directory)
+            kwargs['on_preview'](paths[:DIRECTORY_PREVIEW_COUNT])
+            release.wait(WAIT_SECONDS)
+            finished.set()
+            return paths
+
+        with patch.object(Project, 'scan_image_paths', side_effect=paused_scan):
+            try:
+                self.app._load_directory(str(self.images))
+                old_generation = self.app._scan_generation
+                self.wait(lambda: self.app._thumb_panel.model.rowCount() == DIRECTORY_PREVIEW_COUNT)
+                self.app._load_directory(str(other))
+                self.wait(lambda: self.app._canvas._current_image is not None
+                          and self.app._canvas._current_image.path == other / 'other.jpg')
+            finally:
+                release.set()
+            self.wait(finished.is_set)
+        self.app._on_scan_preview([self.paths[0]], old_generation)
+        self.app._on_scan_complete(str(self.images), self.paths, old_generation)
+        self.assertEqual([item.name for item in self.app._thumb_panel.items], ['other.jpg'])
+        self.assertEqual(self.app._label_manager.get_name(0), 'fox')
+        self.assertTrue(self.app._thumb_panel.view.isEnabled())
+
+    def test_manual_labels_during_scan_override_detected_names_on_first_image(self):
+        release = threading.Event()
+        original_scan = Project.scan_image_paths
+        manual = self.root / 'manual.txt'
+        manual.write_text('0: fox\n', encoding='utf-8')
+        annotation = preferred_annotation_txt_path(self.paths[0])
+        annotation.parent.mkdir(parents=True, exist_ok=True)
+        annotation.write_text('0 .5 .5 .2 .2\n', encoding='utf-8')
+
+        def paused_scan(directory, **kwargs):
+            release.wait(WAIT_SECONDS)
+            return original_scan(directory, **kwargs)
+
+        with patch.object(Project, 'scan_image_paths', side_effect=paused_scan):
+            try:
+                self.app._load_directory(str(self.images))
+                with patch('ui.qt.controller.filedialog.askopenfilename', return_value=str(manual)):
+                    self.app._load_label_file_from_disk()
+            finally:
+                release.set()
+            self.wait(lambda: not self.app._directory_loading and self.app._canvas._current_image is not None)
+        self.assertEqual(self.app._label_manager.get_name(0), 'fox')
+        self.assertEqual(self.app._config.last_label_file, str(manual))
+        self.assertEqual(self.app._project.current_image.annotations[0].class_name, 'fox')
+
+    def test_scan_failure_clears_preview_and_restores_list_interaction(self):
+        release = threading.Event()
+
+        def failing_scan(directory, **kwargs):
+            kwargs['on_preview'](self.paths)
+            release.wait(WAIT_SECONDS)
+            raise RuntimeError('test scan failure')
+
+        with patch.object(Project, 'scan_image_paths', side_effect=failing_scan), \
+                patch('ui.qt.controller.showerror') as error:
+            try:
+                self.app._load_directory(str(self.images))
+                self.wait(lambda: self.app._thumb_panel.model.rowCount() == len(self.paths))
+                self.assertFalse(self.app._thumb_panel.view.isEnabled())
+            finally:
+                release.set()
+            self.wait(lambda: not self.app._directory_loading)
+            error.assert_called_once()
+        self.assertEqual(self.app._thumb_panel.model.rowCount(), 0)
+        self.assertTrue(self.app._thumb_panel.view.isEnabled())
+        self.assertIsNone(self.app._canvas._current_image)
+
     def test_missing_label_set_clears_old_classes(self):
         self.load_images()
         (self.images / 'classes.txt').unlink()
@@ -138,17 +268,17 @@ class QtWorkbenchTests(unittest.TestCase):
         item.annotations = [BBox(10, 10, 35, 35, 0, 'deer'), BBox(60, 40, 95, 80, 1, 'person')]
         self.app._box_list_panel.refresh()
         buttons = {b.text(): b for b in self.app._toolbar.findChildren(QPushButton)}
-        buttons['后框'].click()
+        buttons['后框 (E)'].click()
         self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
-        buttons['后框'].click()
+        buttons['后框 (E)'].click()
         self.assertEqual(item.get_selected_annotations(), [item.annotations[1]])
-        buttons['前框'].click()
+        buttons['前框 (Q)'].click()
         self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
         self.assertEqual({i.row() for i in self.app._box_list_panel.table.selectedIndexes()}, {0})
         # 视频预览期间前后框操作不能改变隐藏图片的选择或标注数据。
         self.open_video()
-        buttons['后框'].click()
-        buttons['前框'].click()
+        buttons['后框 (E)'].click()
+        buttons['前框 (Q)'].click()
         self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
 
     def test_open_directory_shortcut_matches_menu_and_refresh_keeps_directory(self):
@@ -362,6 +492,12 @@ class QtWorkbenchTests(unittest.TestCase):
         with patch.object(self.app._status_bar, 'set_overlay') as update:
             self.app._update_label_cache_progress(ready - 1, 50)
             update.assert_not_called()
+        from core.image_item import ImageItem
+        stale = ImageItem(self.paths[1])
+        snapshot = [(stale, str(stale.path.resolve()), {9}, True)]
+        self.app._apply_label_cache_batch(Project(), ready, snapshot, 100)
+        self.app._apply_label_cache_batch(self.app._project, ready - 1, snapshot, 100)
+        self.assertFalse(self.app._project.label_contains_class(self.app._project.image_list[1], 9))
 
     def test_preload_follows_visible_images_and_decode_cache(self):
         for i in range(3, 9):

@@ -25,6 +25,7 @@ from io_ops.video_export import (
 )
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.label_set_detector import iter_label_set_candidates
+from io_ops.label_cache import iter_label_cache_batches
 from io_ops.yolo_exporter import export_yolo
 from io_ops.coco_exporter import export_coco
 from io_ops.voc_exporter import export_voc
@@ -1062,7 +1063,7 @@ class ApplicationController:
         self._config.box_list_column_widths = dict(widths)
         self._config_manager.save(self._config)
 
-    def _apply_manual_statuses(self, dir_path: str):
+    def _apply_manual_statuses(self, dir_path: str, project=None):
         """Apply persisted 'uncertain' marks to the freshly-created image list.
 
         Only 'uncertain' is stored here; annotated/unannotated are derived from
@@ -1072,7 +1073,7 @@ class ApplicationController:
         statuses = load_manual_statuses(image_dir)
         if not statuses:
             return
-        for item in self._project.image_list:
+        for item in (self._project if project is None else project).image_list:
             try:
                 rel = item.path.relative_to(image_dir).as_posix()
             except ValueError:
@@ -1121,7 +1122,7 @@ class ApplicationController:
             f'已导出 {self._label_manager.count()} 个标签到 {name}'
         )
 
-    def _load_item_annotations(self, item: ImageItem):
+    def _load_item_annotations(self, item: ImageItem, label_manager=None):
         """Load YOLO annotations for an image into memory."""
         if (
             item._annotations_loaded
@@ -1135,7 +1136,7 @@ class ApplicationController:
             item._annotation_path_checked = True
             item._annotation_file_path = txt_path
             file_anns = load_annotation_file(
-                item.path, self._label_manager,
+                item.path, self._label_manager if label_manager is None else label_manager,
                 img_width=item.width, img_height=item.height,
                 txt_path=txt_path, annotation_path_resolved=True,
             )
@@ -1190,46 +1191,31 @@ class ApplicationController:
         self._label_cache_jobs.add(self._label_cache_job_generation)
         self._label_cache_progress = 0
         self._status_bar.set_overlay('标签缓存中... 0%')
+        project = self._project
         items = list(self._project.image_list)
 
         import threading
         def bg(gen=self._label_cache_job_generation):
             total = len(items)
-            last_progress = -1
-            for idx, item in enumerate(items, start=1):
-                if self._scan_generation != gen or self._closing:
-                    self._call_in_main(lambda gen=gen: self._label_cache_jobs.discard(gen))
-                    return
-                try:
-                    class_ids = set()
-                    file_exists = False
-                    if item.annotations:
-                        class_ids = {ann.class_id for ann in item.annotations}
-                        file_exists = True
-                    else:
-                        txt = preferred_annotation_txt_path(item.path)
-                        if txt.exists():
-                            file_exists = True
-                            with open(txt, 'r', encoding='utf-8') as f:
-                                for line in f:
-                                    parts = line.strip().split()
-                                    if parts:
-                                        class_ids.add(int(float(parts[0])))
-                    if file_exists and not class_ids:
-                        self._project.cache_background(item.path)
-                    else:
-                        self._project.cache_label_contains(item.path, class_ids)
-                except Exception:
-                    self._project.cache_label_contains(item.path, set())
-                if total > 0:
-                    progress = int(idx * 100 / total)
-                    if progress != last_progress:
-                        last_progress = progress
-                        self._call_in_main(
-                            lambda p=progress, generation=gen: self._update_label_cache_progress(generation, p)
-                        )
+            processed = 0
+            cancelled = lambda: self._scan_generation != gen or self._closing
+            for records in iter_label_cache_batches(items, is_cancelled=cancelled):
+                processed += len(records)
+                self._call_in_main(
+                    lambda batch=records, p=int(processed * 100 / total):
+                        self._apply_label_cache_batch(project, gen, batch, p)
+                )
+            if cancelled():
+                self._call_in_main(lambda: self._label_cache_jobs.discard(gen))
+                return
             self._call_in_main(lambda gen=gen: self._finish_label_cache_preload(gen))
         threading.Thread(target=bg, daemon=True).start()
+
+    def _apply_label_cache_batch(self, project, generation, records, progress):
+        if generation != self._scan_generation or project is not self._project or self._closing:
+            return
+        project.merge_label_cache_batch(records)
+        self._update_label_cache_progress(generation, progress)
 
     def _update_label_cache_progress(self, generation, progress):
         if generation == self._scan_generation and not self._closing:
@@ -1354,67 +1340,77 @@ class ApplicationController:
         refresh_label_filter_class_id = self._project.label_filter_class_id
         self._project.image_list.clear()
         self._project.current_index = -1
+        self._canvas.clear_all()
+        self._box_list_panel.set_image(None)
         self._thumb_panel.clear()
+        self._thumb_panel.set_interaction_enabled(False)
         if not from_refresh:
-            # 预读图片标注前确定本目录类别，避免后台扫描沿用旧目录的类别名称。
-            self._try_auto_folder_labels(dir_path)
+            self._pending_refresh = None
+            self._clear_directory_labels()
 
         pending_refresh = self._pending_refresh if from_refresh else None
+        label_definitions = self._label_manager.to_dict_list()
 
         def _bg_scan():
             try:
-                paths = Project.scan_image_paths(dir_path)
-            except Exception as e:
-                self._call_in_main(lambda err=e: self._on_scan_failed(err, scan_gen))
-                return
-
-            refreshed_indices = None
-            preloaded = None
-            preload_path = None
-            if pending_refresh:
-                refreshed_project = Project(
+                cancelled = lambda: scan_gen != self._scan_generation or self._closing
+                paths = Project.scan_image_paths(
+                    dir_path,
+                    on_preview=lambda preview: self._call_in_main(
+                        lambda: self._on_scan_preview(preview, scan_gen)),
+                    is_cancelled=cancelled,
+                )
+                if cancelled():
+                    return
+                detected_labels = (next(iter_label_set_candidates(Path(dir_path)), None)
+                                   if not from_refresh else None)
+                prepared = Project(
                     image_filter=refresh_image_filter,
                     label_filter_class_id=refresh_label_filter_class_id,
                 )
-                refreshed_project.set_image_paths(dir_path, paths)
-                statuses = load_manual_statuses(Path(dir_path))
-                if statuses:
-                    image_dir = Path(dir_path)
-                    for item in refreshed_project.image_list:
-                        try:
-                            relative = item.path.relative_to(image_dir).as_posix()
-                        except ValueError:
-                            relative = item.path.name
-                        if statuses.get(relative) == IMAGE_CATEGORY_UNCERTAIN:
-                            item.manual_annotation_status = IMAGE_CATEGORY_UNCERTAIN
-                refreshed_indices = refreshed_project.get_filtered_indices()
-                current_path = pending_refresh['current_path']
-                if current_path is not None:
-                    preload_path = next(
-                        (
-                            paths[index] for index in refreshed_indices
-                            if paths[index] == current_path
-                            or str(paths[index]) == str(current_path)
-                        ),
-                        None,
-                    )
-                if preload_path is None and refreshed_indices:
-                    preload_path = paths[refreshed_indices[0]]
-            else:
+                # 文件索引及状态读取在后台完成，主线程只接收准备好的模型。
+                prepared.set_image_paths(dir_path, paths)
+                self._apply_manual_statuses(dir_path, project=prepared)
+                filtered_indices = prepared.get_filtered_indices()
+                refreshed_indices = filtered_indices if pending_refresh else None
+                if cancelled():
+                    return
+
                 preload_path = self._resolve_preload_path(dir_path, paths)
-
-            if preload_path:
-                preloaded = ImageItem(path=preload_path)
-                if self._image_loader.load_image_sync(preloaded):
-                    self._load_item_annotations(preloaded)
-
-            self._call_in_main(
-                lambda item=preloaded: self._on_scan_complete(
-                    dir_path, paths, scan_gen, item, refreshed_indices,
+                if pending_refresh:
+                    current_path = pending_refresh['current_path']
+                    preload_path = next(
+                        (paths[index] for index in refreshed_indices
+                         if current_path is not None and str(paths[index]) == str(current_path)),
+                        paths[refreshed_indices[0]] if refreshed_indices else None,
+                    )
+                preloaded = ImageItem(path=preload_path) if preload_path else None
+                if preloaded and self._image_loader.load_image_sync(preloaded):
+                    # 首图标注也在后台读取，类别快照不受其他目录或手动导入影响。
+                    labels = LabelManager()
+                    labels.from_dict_list(detected_labels[1] if detected_labels else label_definitions)
+                    self._load_item_annotations(preloaded, label_manager=labels)
+                if cancelled():
+                    return
+                self._call_in_main(
+                    lambda: self._on_scan_complete(
+                        dir_path, paths, scan_gen, preloaded, refreshed_indices,
+                        prepared_project=prepared, detected_labels=detected_labels,
+                        from_refresh=from_refresh,
+                    )
                 )
-            )
+            except Exception as e:
+                self._call_in_main(lambda err=e: self._on_scan_failed(err, scan_gen))
 
         threading.Thread(target=_bg_scan, daemon=True).start()
+
+    def _on_scan_preview(self, paths: list, scan_gen: int):
+        """展示首批扫描结果；最终序号确定前只预览，不向业务控制器发送选择。"""
+        if scan_gen != self._scan_generation or not self._directory_loading or self._closing:
+            return
+        self._thumb_panel.set_images([ImageItem(path=path) for path in paths])
+        self._thumb_panel.count.setText(f'已发现 {len(paths)} 张图片 · 后台扫描中…')
+        self._status_bar.info(f'已显示首批 {len(paths)} 张图片，正在后台加载完整目录…')
 
     def _resolve_preload_path(self, dir_path: str, paths: list):
         """Pick the image to decode early while the UI thread stays responsive."""
@@ -1453,19 +1449,38 @@ class ApplicationController:
         if scan_gen != self._scan_generation:
             return
         self._directory_loading = False
+        self._thumb_panel.clear()
+        self._thumb_panel.set_interaction_enabled(True)
         self._status_bar.error(f'加载目录失败: {error}')
         showerror(self, '错误', f'加载目录失败:\n{error}')
         self.after_idle(self._start_pending_weights_load)
 
     def _on_scan_complete(self, dir_path: str, paths: list, scan_gen: int,
                           preloaded: ImageItem = None,
-                          refreshed_indices: list = None):
+                          refreshed_indices: list = None, prepared_project=None,
+                          detected_labels=None, from_refresh=False):
         if scan_gen != self._scan_generation:
             return
         self._directory_loading = False
 
-        count = self._project.set_image_paths(dir_path, paths)
-        self._apply_manual_statuses(dir_path)
+        if prepared_project is None:
+            count = self._project.set_image_paths(dir_path, paths)
+            self._apply_manual_statuses(dir_path)
+        else:
+            if (prepared_project.image_filter != self._project.image_filter
+                    or prepared_project.label_filter_class_id != self._project.label_filter_class_id):
+                prepared_project.invalidate_filter_cache()
+            prepared_project.image_filter = self._project.image_filter
+            prepared_project.label_filter_class_id = self._project.label_filter_class_id
+            self._project = prepared_project
+            count = prepared_project.total_images
+        # 扫描期间用户手动导入的类别优先，后台识别结果不覆盖新的选择。
+        if not from_refresh and not self._label_manager.count() and not self._config.last_label_file:
+            if detected_labels:
+                self._apply_detected_label_set(*detected_labels)
+            else:
+                self._status_bar.warning('未找到本目录的标签集，请手动加载标签')
+        self._thumb_panel.set_interaction_enabled(True)
         self._filter_status_snapshot.clear()
         self._image_undo_managers.clear()
         self._navigation_undo_stack.clear()
@@ -1475,6 +1490,8 @@ class ApplicationController:
 
         if count > 0:
             if preloaded and preloaded.is_loaded:
+                for annotation in preloaded.annotations:
+                    annotation.class_name = self._label_manager.get_name(annotation.class_id)
                 self._merge_preloaded_item(preloaded)
 
             self._config.last_directory = dir_path
@@ -1573,11 +1590,17 @@ class ApplicationController:
         if self._project.image_dir:
             self._config.last_directory = str(self._project.image_dir)
 
-    def _try_auto_folder_labels(self, dir_path: str):
-        """每次打开目录仅识别本地标签集，未匹配时保留空类别供手动选择。"""
+    def _clear_directory_labels(self):
+        """清除上一目录的类别，防止异步加载期间沿用旧标签。"""
         self._label_manager.clear()
         self._config.last_label_file = ''
         self._config.label_definitions = []
+        self._label_panel.refresh()
+        self._refresh_label_filter_options()
+
+    def _try_auto_folder_labels(self, dir_path: str):
+        """每次打开目录仅识别本地标签集，未匹配时保留空类别供手动选择。"""
+        self._clear_directory_labels()
         if self._try_import_root_classes_file(dir_path):
             return
         self._label_panel.refresh()

@@ -266,6 +266,7 @@ class LabelPanel(QFrame):
         self.search.textChanged.connect(lambda: self.refresh())
         layout.addWidget(self.search)
         self.list = QListWidget()
+        self.list.setObjectName('classList')
         self.list.setUniformItemSizes(True)
         self.list.currentRowChanged.connect(self.select_class)
         self.list.itemDoubleClicked.connect(lambda item: self.edit_note())

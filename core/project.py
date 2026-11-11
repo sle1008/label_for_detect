@@ -15,6 +15,9 @@ from io_ops.annotation_status import (
 )
 from utils.constants import IMAGE_EXTENSIONS
 
+# ==================== 目录扫描参数设置区 ====================
+DIRECTORY_PREVIEW_COUNT = 64
+
 # Sentinel stored in _label_contains_cache for images whose label file exists
 # but contains no boxes (YOLO background sample).  Distinct from plain set()
 # which is used when no label file exists at all.
@@ -65,7 +68,7 @@ class Project:
         return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
     
     @staticmethod
-    def scan_image_paths(dir_path: str) -> List[Path]:
+    def scan_image_paths(dir_path: str, on_preview=None, is_cancelled=None) -> List[Path]:
         """Scan all image paths under a directory without loading pixels."""
         root = Path(dir_path)
         if not root.is_dir():
@@ -75,9 +78,17 @@ class Project:
         try:
             for dirpath, _, filenames in os.walk(root):
                 for name in filenames:
+                    if is_cancelled and is_cancelled():
+                        return []
+                    # 先检查扩展名，减少目录中非图片文件的磁盘查询。
+                    if Path(name).suffix.lower() not in IMAGE_EXTENSIONS:
+                        continue
                     path = Path(dirpath) / name
                     if Project._is_image_file(path):
                         files.append(path)
+                        if on_preview and len(files) == DIRECTORY_PREVIEW_COUNT:
+                            # 临时预览只覆盖已发现的文件，最终仍按原规则全局排序。
+                            on_preview(sorted(files, key=lambda p: (p.name.casefold(), str(p).casefold(), str(p))))
         except OSError:
             pass
         
@@ -174,6 +185,17 @@ class Project:
     def cache_background(self, path: Path):
         """Record that the image has a label file that contains no boxes."""
         self._label_contains_cache[str(path.resolve())] = _BACKGROUND_ENTRY
+
+    def merge_label_cache_batch(self, records):
+        """合并后台磁盘快照，已加载或编辑的对象始终以当前会话内容为准。"""
+        for item, key, class_ids, file_exists in records:
+            if item._annotations_loaded or item.is_dirty:
+                class_ids = {annotation.class_id for annotation in item.annotations}
+                if not class_ids:
+                    # 当前会话可能刚保存或删除空标注，不能沿用较早的文件快照。
+                    file_exists = resolve_annotation_txt_path(item.path, scan_fallback=False) is not None
+            self._label_contains_cache[key] = (_BACKGROUND_ENTRY if file_exists and not class_ids
+                                                else set(class_ids))
 
     def _is_background_item(self, item: ImageItem) -> bool:
         """True when the image has a label file that is empty (no boxes)."""
