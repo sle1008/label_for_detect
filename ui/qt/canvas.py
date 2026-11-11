@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QWidget
 from core.annotation import BBox
 from ui.canvas_state import CanvasMode, LABEL_MODE_CYCLE, LABEL_MODE_FULL, LABEL_MODE_COMPACT
 from ui.qt.bridge import VisibilityMixin, event_position
+from ui.qt.theme import theme_color
 
 # ==================== 画布参数设置区 ====================
 DRAG_THRESHOLD = 3
@@ -105,6 +106,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         self._current_image = None
         self._source_pil_image = image
         self._video_annotations = annotations or []
+        self.app._box_list_panel.set_video_annotations(self._video_annotations)
         self._set_pixels(image)
         self.fit_to_window()
 
@@ -189,15 +191,16 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor('#0d1117'))
+        theme = self.app._config.ui_theme
+        painter.fillRect(self.rect(), QColor(theme_color('canvas', theme)))
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._qimage is None:
-            painter.setPen(QColor('#5a6b84'))
+            painter.setPen(QColor(theme_color('muted', theme)))
             painter.setFont(QFont('Microsoft YaHei UI', 24, QFont.Weight.DemiBold))
             painter.drawText(self.rect().adjusted(0, -45, 0, -45), Qt.AlignmentFlag.AlignCenter, '开始新的标注工作')
             painter.setFont(QFont('Microsoft YaHei UI', 11))
-            painter.setPen(QColor('#8494ab'))
+            painter.setPen(QColor(theme_color('placeholder', theme)))
             painter.drawText(self.rect().adjusted(0, 35, 0, 35), Qt.AlignmentFlag.AlignCenter,
                              '打开图片目录开始标注，或载入视频进行预览与推理')
             return
@@ -247,7 +250,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         if self._rubber:
             painter.drawRect(self._rubber)
         if self._pointer and not self._video_mode and self._frame_rect().contains(self._pointer):
-            painter.setPen(QPen(QColor('#6e8bad'), 0.7, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor(theme_color('crosshair', theme)), 0.7, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(self._pointer.x(), 0), QPointF(self._pointer.x(), self.height()))
             painter.drawLine(QPointF(0, self._pointer.y()), QPointF(self.width(), self._pointer.y()))
 

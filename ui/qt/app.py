@@ -15,8 +15,8 @@ from ui.qt.controller import ApplicationController
 from ui.qt.state import initialize_state
 from ui.qt.canvas import AnnotationCanvas
 from ui.qt.panels import (ThumbnailPanel, LabelPanel, BoxListPanel, ThresholdSlider,
-                           VideoControls, StatusBar, Combo, section)
-from ui.qt.theme import STYLESHEET, FONT_FAMILY, FONT_SIZE, icon
+                           VideoControls, StatusBar, FilterButton, section)
+from ui.qt.theme import FONT_FAMILY, FONT_SIZE, icon, apply_theme, set_button_icon
 from ui.qt.dialogs import showerror
 from utils.paths import get_icon_path
 from io_ops.pre_annotator import DEFAULT_INFERENCE_MODE, INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS
@@ -36,7 +36,6 @@ def ensure_application():
     _application = QApplication.instance() or QApplication(sys.argv[:1])
     _application.setStyle('Fusion')
     _application.setFont(QFont(FONT_FAMILY, FONT_SIZE))
-    _application.setStyleSheet(STYLESHEET)
     return _application
 
 
@@ -47,20 +46,21 @@ class CommandBar(QFrame):
         self._batch_running = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 8)
-        for text, graphic, action in [('撤销', 'undo', app._undo), ('重做', 'redo', app._redo),
-                                      ('删除', 'trash', app._delete_selected),
-                                      ('适应', 'fit', app._fit_window), ('旋转 180°', 'rotate', app._rotate_current_image),
-                                      ('标签显示', 'label', app._cycle_label_mode)]:
+        for text, graphic, action in [('撤回（Ctrl+Z）', 'undo', app._undo), ('重做（Ctrl+Y）', 'redo', app._redo),
+                                      ('删除选中标注（Delete）', 'trash', app._delete_selected),
+                                      ('适应窗口（F）', 'fit', app._fit_window), ('旋转 180°（R）', 'rotate', app._rotate_current_image),
+                                      ('切换标签显示（T）', 'label', app._cycle_label_mode)]:
             button = QPushButton(text)
-            button.setIcon(icon(graphic))
+            set_button_icon(button, graphic)
             button.setToolTip(text)
+            button.setAccessibleName(text)
             button.setText('')
             button.setFixedWidth(36)
             button.clicked.connect(action)
             layout.addWidget(button)
         layout.addStretch()
         self.infer = QPushButton('预标注  Ctrl+X')
-        self.infer.setIcon(icon('spark'))
+        set_button_icon(self.infer, 'spark')
         self.infer.setObjectName('primary')
         self.infer.clicked.connect(app._pre_annotate_current)
         layout.addWidget(self.infer)
@@ -82,7 +82,9 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._next_timer = 0
         self._closing = False
         self._callback_errors = []
+        self._requested_ui = None
         initialize_state(self, config_directory)
+        apply_theme(QApplication.instance(), self._config.ui_theme)
         self.setWindowTitle('视觉标注工作台')
         self.setMinimumSize(*MINIMUM_WINDOW_SIZE)
         self.resize(*DEFAULT_WINDOW_SIZE)
@@ -98,8 +100,9 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._inference_mode_var.callbacks.append(self.inference_combo.setCurrentText)
         self._setup_canvas_context_menu()
         self._rebuild_label_filter_menu()
+        apply_theme(QApplication.instance(), self._config.ui_theme)
         self._toast = QLabel(self._canvas)
-        self._toast.setStyleSheet('background:#2b3f60;color:white;border:1px solid #648ac2;border-radius:8px;padding:10px 20px;')
+        self._toast.setObjectName('toast')
         self._toast.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._toast.hide()
         self._toast_after_id = None
@@ -134,7 +137,7 @@ class AnnotationApp(QMainWindow, ApplicationController):
             ('导出数据集', 'export', self._export, False),
         ]:
             button = QPushButton(text)
-            button.setIcon(icon(graphic))
+            set_button_icon(button, graphic)
             button.clicked.connect(callback)
             if primary:
                 button.setObjectName('primary')
@@ -153,15 +156,19 @@ class AnnotationApp(QMainWindow, ApplicationController):
         filter_layout = QVBoxLayout(filters)
         filter_layout.setContentsMargins(12, 14, 12, 14)
         filter_layout.addLayout(section('筛选资源', 'FILTERS'))
-        self._status_filter_combo = Combo()
+        filter_row = QHBoxLayout()
+        self._status_filter_combo = FilterButton()
         self._status_filter_combo.addItems(['全部图片', '已标注', '未标注', '不确定'])
         self._status_filter_combo.textActivated.connect(self._on_status_filter_combo_selected)
-        filter_layout.addWidget(self._status_filter_combo)
+        filter_row.addWidget(self._status_filter_combo, 1)
         self.class_filter = QToolButton()
+        self.class_filter.setObjectName('filter')
+        self.class_filter.setMinimumWidth(0)
         self.class_filter.setText('全部标签')
         self.class_filter.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.class_filter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        filter_layout.addWidget(self.class_filter)
+        filter_row.addWidget(self.class_filter, 1)
+        filter_layout.addLayout(filter_row)
         left_layout.addWidget(filters)
         self._thumb_panel = ThumbnailPanel(self)
         left_layout.addWidget(self._thumb_panel, 1)
@@ -204,17 +211,23 @@ class AnnotationApp(QMainWindow, ApplicationController):
         model_layout.addLayout(section('推理引擎', 'INFERENCE'))
         self.model_name = QLabel('未加载模型')
         self.model_name.setObjectName('muted')
-        self.model_name.setWordWrap(True)
+        self.model_name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         model_layout.addWidget(self.model_name)
-        load_model = QPushButton('选择模型权重…')
-        load_model.setIcon(icon('spark'))
+        engine_row = QHBoxLayout()
+        self.load_model = load_model = QPushButton('选择权重…')
+        load_model.setToolTip('选择模型权重（.pt / .onnx / .engine / .trt）')
+        set_button_icon(load_model, 'spark')
         load_model.clicked.connect(self._load_weights)
-        model_layout.addWidget(load_model)
+        engine_row.addWidget(load_model)
         self.inference_combo = QComboBox()
+        self.inference_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.inference_combo.setMinimumWidth(0)
+        self.inference_combo.setToolTip('选择推理分支：one-to-one / one-to-many+NMS')
         self.inference_combo.addItems([INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS])
         self.inference_combo.setCurrentText(DEFAULT_INFERENCE_MODE)
         self.inference_combo.textActivated.connect(self._set_pre_annotation_inference_mode)
-        model_layout.addWidget(self.inference_combo)
+        engine_row.addWidget(self.inference_combo, 1)
+        model_layout.addLayout(engine_row)
         right_layout.addWidget(model_frame)
         self._right_paned = QSplitter(Qt.Orientation.Vertical)
         self._right_paned.setChildrenCollapsible(False)
@@ -222,14 +235,14 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._label_panel = LabelPanel(self)
         self._right_paned.addWidget(self._label_panel)
         self._threshold_slider = ThresholdSlider(self)
-        self._threshold_slider.setFixedHeight(102)
+        self._threshold_slider.setFixedHeight(52)
         self._right_paned.addWidget(self._threshold_slider)
         self._box_list_panel = BoxListPanel(self)
         self._right_paned.addWidget(self._box_list_panel)
-        self._right_paned.setSizes([350, 102, 260])
+        self._right_paned.setSizes([430, 52, 230])
         saved_sashes = self._config.right_pane_sash_positions
         if len(saved_sashes) >= 2:
-            self._right_paned.setSizes([max(150, saved_sashes[0]), 102, 260])
+            self._right_paned.setSizes([max(240, saved_sashes[0]), 52, 230])
         right_layout.addWidget(self._right_paned, 1)
         self._paned.addWidget(right)
         self._paned.setSizes([self._config.left_panel_width or DEFAULT_PANE_WIDTHS[0],
@@ -251,6 +264,7 @@ class AnnotationApp(QMainWindow, ApplicationController):
             'Esc': self._canvas.cancel_or_deselect, 'Ctrl+X': self._pre_annotate_current,
             'Ctrl+Shift+X': self._batch_pre_annotate, 'Q': self._prev_bbox, 'E': self._next_bbox,
             'S': self._on_label_search_shortcut,
+            'F5': self._refresh_list,
         }
         for i in range(1, 10):
             self.shortcuts[str(i)] = lambda cid=i - 1: self._quick_select_class(cid)
@@ -279,7 +293,7 @@ class AnnotationApp(QMainWindow, ApplicationController):
             self.menuBar().addActions(menu.widget.actions())
             self._menubar_owner = menu
 
-    def after(self, milliseconds, callback):
+    def after(self, milliseconds, callback, *args):
         self._next_timer += 1
         key = self._next_timer
         timer = QTimer(self)
@@ -289,13 +303,13 @@ class AnnotationApp(QMainWindow, ApplicationController):
             self._timers.pop(key, None)
             timer.deleteLater()
             if not self._closing:
-                callback()
+                callback(*args)
         timer.timeout.connect(invoke)
         timer.start(milliseconds)
         return key
 
-    def after_idle(self, callback):
-        return self.after(0, callback)
+    def after_idle(self, callback, *args):
+        return self.after(0, callback, *args)
 
     def after_cancel(self, key):
         timer = self._timers.pop(key, None)
@@ -361,6 +375,26 @@ class AnnotationApp(QMainWindow, ApplicationController):
 
     def _on_close(self):
         self.close()
+
+    def _set_theme(self, theme):
+        self._config.ui_theme = theme
+        self._theme_var.set(theme)
+        apply_theme(QApplication.instance(), theme)
+        self._config_manager.save(self._config)
+
+    def _request_ui_switch(self):
+        """完成保存和资源清理后，由启动器进入另一种界面的事件循环。"""
+        if (self._pre_annotator.is_busy or self._weights_load_in_progress
+                or self._video_export_running or self._image_export_running or self._directory_loading
+                or self._pending_video_generation is not None or self._video_delete_running):
+            self._status_bar.warning('请等待当前推理、导出或加载任务完成，再切换界面')
+            return
+        previous = self._config.ui_backend
+        self._config.ui_backend = 'legacy'
+        if self.close():
+            self._requested_ui = 'legacy'
+        else:
+            self._config.ui_backend = previous
 
     def closeEvent(self, event):
         try:

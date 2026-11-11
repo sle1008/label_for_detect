@@ -11,13 +11,15 @@ from ui.qt.bridge import filedialog
 
 # ==================== 对话框参数设置区 ====================
 DIALOG_WIDTH = 520
+CHOICE_DIALOG_WIDTH = 350
 RESTORE_COUNTDOWN_SECONDS = 10
 
 
 def showinfo(parent, title, message):
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
-    dialog.resize(DIALOG_WIDTH, 460 if len(message) > 600 else 260)
+    dialog.resize(DIALOG_WIDTH if len(message) > 600 else CHOICE_DIALOG_WIDTH,
+                  460 if len(message) > 600 else 260)
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(24, 24, 24, 20)
     text = QTextBrowser()
@@ -53,7 +55,8 @@ class ChoiceDialog:
         self.result = None
         self.dialog = QDialog(parent)
         self.dialog.setWindowTitle(title)
-        self.dialog.setMinimumWidth(DIALOG_WIDTH)
+        self.dialog.setMinimumWidth(CHOICE_DIALOG_WIDTH)
+        self.dialog.resize(CHOICE_DIALOG_WIDTH, self.dialog.height())
         self.layout = QVBoxLayout(self.dialog)
         self.layout.setContentsMargins(24, 24, 24, 24)
         self.layout.setSpacing(14)
@@ -184,7 +187,7 @@ class ImageExportProgressDialog:
     def __init__(self, parent, total, mode):
         self.dialog = QDialog(parent)
         self.dialog.setWindowTitle('正在导出图片')
-        self.dialog.setMinimumWidth(DIALOG_WIDTH)
+        self.dialog.setMinimumWidth(CHOICE_DIALOG_WIDTH)
         self.dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
         layout = QVBoxLayout(self.dialog)
         layout.setContentsMargins(24, 24, 24, 24)

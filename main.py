@@ -110,31 +110,51 @@ def main():
     parser.add_argument('--dir', type=str, help='初始图片目录')
     parser.add_argument('--labels', type=str, help='标签文件路径')
     parser.add_argument('--weights', type=str, help='预标注模型 (.pt/.onnx/.engine/.trt)')
-    parser.add_argument('--legacy-ui', action='store_true', help='使用稳定版 Tk 兼容界面')
+    appearance = parser.add_mutually_exclusive_group()
+    appearance.add_argument('--legacy-ui', action='store_true', help='使用稳定版 Tk 兼容界面')
+    appearance.add_argument('--modern-ui', action='store_true', help='使用现代 Qt 界面')
     args = parser.parse_args()
 
+    from core.config import ConfigManager
+    backend = ConfigManager().load().ui_backend
     if args.legacy_ui:
-        from ui.app import AnnotationApp
-    else:
-        from ui.qt.app import AnnotationApp
+        backend = 'legacy'
+    elif args.modern_ui:
+        backend = 'modern'
 
     try:
-        app = AnnotationApp()
+        first_window = True
+        while True:
+            # 每次只运行一种窗口事件循环，单实例锁在界面切换期间持续保留。
+            if backend == 'legacy':
+                from ui.app import AnnotationApp
+            else:
+                from ui.qt.app import AnnotationApp
+            app = AnnotationApp()
 
-        # Apply command-line overrides
-        if args.dir:
-            app._load_directory(args.dir)
-        if args.labels:
-            ext = Path(args.labels).suffix.lower()
-            if ext == '.txt':
-                app._label_manager.load_from_txt(args.labels)
-            elif ext in ('.yaml', '.yml'):
-                app._label_manager.load_from_yaml(args.labels)
-            app._label_panel.refresh()
-        if args.weights:
-            app._defer_weights_load_until_images_ready(args.weights)
-
-        app.mainloop()
+            # 命令行只在首次启动覆盖会话，切换界面后恢复刚保存的目录与位置。
+            if first_window:
+                if args.dir:
+                    app._load_directory(args.dir)
+                if args.labels:
+                    ext = Path(args.labels).suffix.lower()
+                    if ext == '.txt':
+                        app._label_manager.load_from_txt(args.labels)
+                    elif ext in ('.yaml', '.yml'):
+                        app._label_manager.load_from_yaml(args.labels)
+                    app._label_panel.refresh()
+                if args.weights:
+                    app._defer_weights_load_until_images_ready(args.weights)
+            first_window = False
+            app.mainloop()
+            requested = getattr(app, '_requested_ui', None)
+            if requested not in ('modern', 'legacy'):
+                break
+            if backend != 'legacy':
+                from PySide6.QtCore import QCoreApplication, QEvent
+                app.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            backend = requested
     finally:
         _release_single_instance(mutex_handle)
 

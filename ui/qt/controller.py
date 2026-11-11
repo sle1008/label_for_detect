@@ -101,7 +101,7 @@ class ApplicationController:
         file_menu = Menu(menubar, tearoff=0)
         file_menu.add_command(label='打开目录...', command=self._open_directory, accelerator='Ctrl+O')
         file_menu.add_command(label='打开视频...', command=self._open_video, accelerator='Ctrl+Shift+O')
-        file_menu.add_command(label='刷新列表', command=self._refresh_list)
+        file_menu.add_command(label='刷新列表', command=self._refresh_list, accelerator='F5')
         file_menu.add_command(label='加载标签...', command=self._load_label_file)
         file_menu.add_command(label='加载预标注权重...', command=self._load_weights)
         file_menu.add_separator()
@@ -152,6 +152,13 @@ class ApplicationController:
             command=lambda: self._set_label_display_mode(LABEL_MODE_HIDDEN),
         )
         view_menu.add_cascade(label='标签显示 (T 循环)', menu=label_mode_menu)
+        view_menu.add_separator()
+        self._theme_var = Value(value=self._config.ui_theme)
+        for text, theme in [('深色主题', 'dark'), ('浅色主题', 'light')]:
+            view_menu.add_radiobutton(label=text, variable=self._theme_var, value=theme,
+                                      command=lambda value=theme: self._set_theme(value))
+        view_menu.add_separator()
+        view_menu.add_command(label='切换到旧版界面外观（保存并重开）', command=self._request_ui_switch)
         menubar.add_cascade(label='视图', menu=view_menu)
 
         # Annotation menu
@@ -1183,12 +1190,15 @@ class ApplicationController:
         self._label_cache_jobs.add(self._label_cache_job_generation)
         self._label_cache_progress = 0
         self._status_bar.set_overlay('标签缓存中... 0%')
+        items = list(self._project.image_list)
 
         import threading
         def bg(gen=self._label_cache_job_generation):
-            total = len(self._project.image_list)
-            for idx, item in enumerate(self._project.image_list, start=1):
-                if self._label_cache_job_generation != gen:
+            total = len(items)
+            last_progress = -1
+            for idx, item in enumerate(items, start=1):
+                if self._scan_generation != gen or self._closing:
+                    self._call_in_main(lambda gen=gen: self._label_cache_jobs.discard(gen))
                     return
                 try:
                     class_ids = set()
@@ -1213,17 +1223,24 @@ class ApplicationController:
                     self._project.cache_label_contains(item.path, set())
                 if total > 0:
                     progress = int(idx * 100 / total)
-                    if progress != self._label_cache_progress:
-                        self._label_cache_progress = progress
+                    if progress != last_progress:
+                        last_progress = progress
                         self._call_in_main(
-                            lambda p=progress: self._status_bar.set_overlay(f'标签缓存中... {p}%')
+                            lambda p=progress, generation=gen: self._update_label_cache_progress(generation, p)
                         )
             self._call_in_main(lambda gen=gen: self._finish_label_cache_preload(gen))
         threading.Thread(target=bg, daemon=True).start()
 
+    def _update_label_cache_progress(self, generation, progress):
+        if generation == self._scan_generation and not self._closing:
+            self._label_cache_progress = progress
+            self._status_bar.set_overlay(f'标签缓存中... {progress}%')
+
     def _finish_label_cache_preload(self, gen: int):
-        self._label_cache_ready_generation = gen
         self._label_cache_jobs.discard(gen)
+        if gen != self._scan_generation:
+            return
+        self._label_cache_ready_generation = gen
         self._label_cache_progress = 100
         self._status_bar.set_info('标签缓存完成')
 
@@ -2950,6 +2967,8 @@ class ApplicationController:
 
     def _on_class_selected(self, class_id: int):
         """Apply selected label to selected bboxes, or set default for new boxes."""
+        if self._video_path or self._pending_video_generation is not None:
+            return
         item = self._project.current_image
         if not item:
             return
@@ -3586,6 +3605,7 @@ class ApplicationController:
 ═══════════════════════════
 Ctrl+O      打开目录
 Ctrl+Shift+O 打开视频
+F5          刷新当前图片目录
 , / .       视频上一帧/下一帧（暂停在目标帧）
 Ctrl+S      保存
 Ctrl+Shift+S 导出

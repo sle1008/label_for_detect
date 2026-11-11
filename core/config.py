@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from utils.paths import get_app_root
 
 
+# ==================== 配置参数设置区 ====================
 CONFIG_FILENAME = 'config.json'
 
 
@@ -31,6 +32,8 @@ class AppConfig:
     image_filter: str = 'all'
     label_filter_class_id: Optional[int] = None
     label_mode: str = 'full'
+    ui_theme: str = 'dark'  # 现代界面配色，不改变标注或推理状态。
+    ui_backend: str = 'modern'  # 界面切换后，下次启动沿用相同界面。
     box_list_column_widths: Dict[str, int] = field(default_factory=lambda: {
         'id': 30, 'class': 80, 'conf': 50, 'coords': 120,
     })

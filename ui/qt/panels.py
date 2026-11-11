@@ -2,17 +2,17 @@
 
 from pathlib import Path
 from datetime import datetime
-from PySide6.QtCore import Qt, QAbstractListModel, QModelIndex, QSize, QItemSelectionModel
+from PySide6.QtCore import Qt, QAbstractListModel, QModelIndex, QSize, QItemSelectionModel, QTimer, QPersistentModelIndex, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QListView, QListWidget, QListWidgetItem, QAbstractItemView, QTableWidget,
     QTableWidgetItem, QHeaderView, QComboBox, QSlider, QProgressBar, QPlainTextEdit,
-    QInputDialog, QSizePolicy, QToolButton, QStyle, QStyleOptionSlider,
+    QInputDialog, QSizePolicy, QToolButton, QStyle, QStyleOptionSlider, QMenu,
 )
 from ui.qt.bridge import VisibilityMixin, event_position, filedialog
 from ui.qt.dialogs import askyesno, showerror
-from ui.qt.theme import icon, MUTED
+from ui.qt.theme import icon, theme_color, set_button_icon
 from io_ops.folder_labels import save_labels_txt
 
 # ==================== 面板参数设置区 ====================
@@ -42,6 +42,36 @@ class Combo(QComboBox):
         self.setCurrentText(text)
 
 
+class FilterButton(QToolButton):
+    """与类别筛选使用一致的弹出菜单外观，并保持控制器的取值接口。"""
+    textActivated = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName('filter')
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setMenu(QMenu(self))
+
+    def addItems(self, texts):
+        for text in texts:
+            self.menu().addAction(text).triggered.connect(lambda checked=False, value=text: self.choose(value))
+        if texts:
+            self.set(texts[0])
+
+    def choose(self, text):
+        self.set(text)
+        self.textActivated.emit(text)
+
+    def get(self):
+        return self.text()
+
+    def set(self, text):
+        self.setText(text)
+        self.setToolTip(text + '：点击展开筛选选项')
+
+
 class ImageListModel(QAbstractListModel):
     """只为可见行提供文本，数万张图片不创建逐行控件。"""
     def __init__(self, owner):
@@ -62,7 +92,7 @@ class ImageListModel(QAbstractListModel):
         if role == Qt.ItemDataRole.SizeHintRole:
             return QSize(120, 38)
         if role == Qt.ItemDataRole.ForegroundRole and item.manual_annotation_status == 'uncertain':
-            return QColor('#e9bd77')
+            return QColor(theme_color('uncertain', self.owner.app._config.ui_theme))
         return None
 
 
@@ -94,10 +124,18 @@ class ThumbnailPanel(QFrame):
         self.count = QLabel('0 张')
         self.count.setObjectName('muted')
         title = section('媒体资源', 'LIBRARY')
+        self.refresh_button = QToolButton()
+        set_button_icon(self.refresh_button, 'refresh')
+        self.refresh_button.setText('刷新')
+        self.refresh_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.refresh_button.setToolTip('刷新图片列表（F5）：重新扫描当前目录')
+        self.refresh_button.setAccessibleName('刷新图片列表')
+        self.refresh_button.clicked.connect(app._refresh_list)
+        title.addWidget(self.refresh_button)
         layout.addLayout(title)
         layout.addWidget(self.count)
         self.video = VideoPathButton()
-        self.video.setIcon(icon('video'))
+        set_button_icon(self.video, 'video')
         self.video.setCheckable(True)
         self.video.setMinimumWidth(0)
         self.video.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -113,7 +151,7 @@ class ThumbnailPanel(QFrame):
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.model = ImageListModel(self)
         self.view.setModel(self.model)
-        self.view.selectionModel().currentChanged.connect(lambda current, previous: self.select_image(current))
+        self.view.selectionModel().currentChanged.connect(self.queue_image_selection)
         self.view.clicked.connect(lambda index: self.select_image(index) if app._video_path else None)
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.context_menu)
@@ -123,6 +161,14 @@ class ThumbnailPanel(QFrame):
         if index.isValid():
             self.select_video(False)
             self.app._on_thumb_selected(self.indices[index.row()])
+
+    def queue_image_selection(self, current, previous):
+        # Qt 完成 Ctrl/Shift 的选择处理后再导航，防止预览回调覆盖本次多选。
+        index = QPersistentModelIndex(current)
+        def select():
+            if index.isValid() and self.view.currentIndex() == index and not self.app._closing:
+                self.select_image(index)
+        QTimer.singleShot(0, select)
 
     def context_menu(self, position):
         index = self.view.indexAt(position)
@@ -151,7 +197,7 @@ class ThumbnailPanel(QFrame):
             model_index = self.model.index(self.indices.index(index))
             selection = self.view.selectionModel()
             selection.blockSignals(True)
-            if selection.isSelected(model_index):
+            if selection.isSelected(model_index) or selection.currentIndex() == model_index:
                 selection.setCurrentIndex(model_index, QItemSelectionModel.SelectionFlag.NoUpdate)
             else:
                 self.view.setCurrentIndex(model_index)
@@ -312,6 +358,7 @@ class BoxListPanel(QFrame):
         super().__init__()
         self.app = app
         self._current_image = None
+        self._video_annotations = None
         self.setObjectName('panel')
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 16, 14, 10)
@@ -340,10 +387,19 @@ class BoxListPanel(QFrame):
 
     def set_image(self, item):
         self._current_image = item
+        self._video_annotations = None
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.refresh()
+
+    def set_video_annotations(self, annotations):
+        self._current_image = None
+        self._video_annotations = annotations
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.refresh()
 
     def refresh(self):
-        annotations = self._current_image.annotations if self._current_image else []
+        annotations = (self._video_annotations if self._video_annotations is not None else
+                       self._current_image.annotations if self._current_image else [])
         self.table.blockSignals(True)
         self.table.clearSelection()
         self.table.setRowCount(len(annotations))
@@ -356,7 +412,7 @@ class BoxListPanel(QFrame):
                 if col == 1:
                     item.setForeground(QColor(self.app._label_manager.get_color(box.class_id)))
                 self.table.setItem(row, col, item)
-            if box.is_selected:
+            if box.is_selected and self._video_annotations is None:
                 for col in range(4):
                     self.table.item(row, col).setSelected(True)
         self.table.blockSignals(False)
@@ -369,6 +425,8 @@ class BoxListPanel(QFrame):
             self.app._on_bbox_selected_from_list()
 
     def context_menu(self, position):
+        if self._video_annotations is not None:
+            return
         from ui.qt.bridge import Menu
         menu = Menu(self)
         menu.add_command(label='删除选中标注', command=self.app._delete_selected)
@@ -381,21 +439,24 @@ class ThresholdSlider(QFrame):
     def __init__(self, app):
         super().__init__()
         self.setObjectName('panel')
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        row = section('置信度阈值')
-        self.value = QLabel('0.50')
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        heading = QLabel('置信度阈值')
+        layout.addWidget(heading)
+        self.value = QLabel(f'{app._threshold:.2f}')
         self.value.setObjectName('badge')
-        row.addWidget(self.value)
-        layout.addLayout(row)
         self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setMinimumWidth(60)
+        self.slider.setToolTip('预标注置信度阈值')
         self.slider.setRange(1, 99)
         self.slider.setValue(round(app._threshold * 100))
         self.slider.valueChanged.connect(lambda value: (self.value.setText(f'{value/100:.2f}'), app._on_threshold_changed(value / 100)))
-        layout.addWidget(self.slider)
+        layout.addWidget(self.slider, 1)
+        layout.addWidget(self.value)
 
     def set(self, value):
         self.slider.setValue(round(value * 100))
+        self.value.setText(f'{self.slider.value() / 100:.2f}')
 
 
 class TimelineSlider(QSlider):
@@ -455,9 +516,10 @@ class VideoControls(VisibilityMixin, QFrame):
         controls.addWidget(self._play_button)
         for delta in (-1, 1):
             button = QPushButton()
-            button.setIcon(icon('prev' if delta < 0 else 'next'))
+            set_button_icon(button, 'prev' if delta < 0 else 'next')
             button.setFixedWidth(36)
             button.setToolTip('上一帧 (,)' if delta < 0 else '下一帧 (.)')
+            button.setAccessibleName('上一帧' if delta < 0 else '下一帧')
             button.clicked.connect(lambda checked=False, d=delta: app._step_video_frame(d))
             controls.addWidget(button)
         self.time = QLabel('00:00 / 00:00')
@@ -473,7 +535,7 @@ class VideoControls(VisibilityMixin, QFrame):
         self.speed.textActivated.connect(lambda text: app._set_video_speed(float(text[:-1])))
         controls.addWidget(self.speed)
         self.export = QPushButton('导出视频')
-        self.export.setIcon(icon('export'))
+        set_button_icon(self.export, 'export')
         self.export.clicked.connect(app._export_video)
         controls.addWidget(self.export)
 
@@ -533,10 +595,11 @@ class StatusBar(QFrame):
         layout.setContentsMargins(6, 3, 6, 3)
         row = QHBoxLayout()
         indicator = QLabel('●  READY')
-        indicator.setStyleSheet('color: #78c8a0; font-size: 10px;')
+        indicator.setObjectName('ready')
         row.addWidget(indicator)
         self.label = QLabel('就绪 · 打开目录或视频开始标注')
         self.label.setObjectName('muted')
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setMinimumWidth(0)
         self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         row.addWidget(self.label, 1)

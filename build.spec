@@ -15,7 +15,7 @@ a = Analysis(
     ['main.py'],
     pathex=[str(root)],
     binaries=[],
-    datas=video_encoder_data,
+    datas=video_encoder_data + [(str(root / 'ui' / 'qt' / 'assets'), 'ui/qt/assets')],
     hiddenimports=[
         'PIL._tkinter_finder',
         'PySide6.QtCore',

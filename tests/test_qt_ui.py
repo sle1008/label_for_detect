@@ -193,7 +193,14 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertFalse(self.app._video_show_annotations)
 
     def test_video_inference_cache_and_annotated_export(self):
+        self.load_images()
+        image = self.app._project.current_image
+        image.annotations = [BBox(10, 10, 40, 40, 0, 'deer')]
+        image.annotations[0].is_selected = True
         self.open_video()
+        self.assertEqual(self.app._box_list_panel.table.rowCount(), 0)
+        self.app._on_class_selected(1)
+        self.assertEqual(image.annotations[0].class_id, 0)
         self.app._pre_annotator._model = Mock(return_value=[])
         output = self.root / 'annotated.mp4'
         with patch.object(self.app._pre_annotator, 'predict_frame', return_value=[BBox(5, 5, 40, 40, 0, 'deer', .9)]) as infer, \
@@ -206,6 +213,8 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(self.app._canvas._video_annotations, [])
         self.app._play_listed_video(True)
         self.wait(lambda: bool(self.app._canvas._video_annotations))
+        self.assertEqual(self.app._box_list_panel.table.rowCount(), 1)
+        self.assertEqual(self.app._box_list_panel.table.item(0, 1).text(), 'deer')
 
     def test_video_row_remove_and_return_to_images_preserve_files(self):
         self.load_images()
@@ -282,6 +291,147 @@ class QtWorkbenchTests(unittest.TestCase):
             selection.select(panel.model.index(row), QItemSelectionModel.SelectionFlag.Select)
         panel.set_current_by_full_index(1)
         self.assertEqual(len(selection.selectedIndexes()), 2)
+
+    def test_real_ctrl_click_toggles_rows_and_shift_selects_range(self):
+        for name in ('03.jpg', '04.jpg'):
+            Image.new('RGB', (320, 200)).save(self.images / name)
+        self.load_images()
+        panel = self.app._thumb_panel
+        def click(row, modifier=Qt.KeyboardModifier.NoModifier):
+            point = panel.view.visualRect(panel.model.index(row)).center()
+            QTest.mouseClick(panel.view.viewport(), Qt.MouseButton.LeftButton, modifier, point)
+            self.runtime.processEvents()
+            self.wait(lambda: self.app._project.current_index == row)
+            return sorted(index.row() for index in panel.view.selectionModel().selectedIndexes())
+        self.assertEqual(click(0), [0])
+        self.assertEqual(click(2, Qt.KeyboardModifier.ControlModifier), [0, 2])
+        self.assertEqual(click(0, Qt.KeyboardModifier.ControlModifier), [2])
+        self.assertEqual(click(3, Qt.KeyboardModifier.ShiftModifier), [0, 1, 2, 3])
+
+    def test_label_cache_and_category_menus_include_background(self):
+        from core.project import LABEL_FILTER_BACKGROUND
+        for name in ('03.jpg', '04.jpg'):
+            Image.new('RGB', (320, 200)).save(self.images / name)
+        for name, content in [('01.jpg', '0 .5 .5 .2 .2\n'), ('02.jpg', '1 .5 .5 .3 .3\n'), ('03.jpg', '')]:
+            target = preferred_annotation_txt_path(self.images / name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding='utf-8')
+        self.load_images()
+        self.wait(lambda: self.app._label_cache_ready_generation == self.app._scan_generation)
+        action = next(a for a in self.app.class_filter.menu().actions() if a.text().startswith('[1]'))
+        action.trigger()
+        self.assertEqual(self.app._thumb_panel.full_indices(), [1])
+        self.app._apply_label_filter(LABEL_FILTER_BACKGROUND)
+        self.assertEqual(self.app._thumb_panel.full_indices(), [2])
+        self.app._apply_label_filter(None)
+        self.app._status_filter_combo.choose('未标注')
+        self.assertEqual(self.app._thumb_panel.full_indices(), [3])
+        ready = self.app._label_cache_ready_generation
+        self.app._finish_label_cache_preload(ready - 1)
+        self.assertEqual(self.app._label_cache_ready_generation, ready)
+        with patch.object(self.app._status_bar, 'set_overlay') as update:
+            self.app._update_label_cache_progress(ready - 1, 50)
+            update.assert_not_called()
+
+    def test_preload_follows_visible_images_and_decode_cache(self):
+        for i in range(3, 9):
+            Image.new('RGB', (320, 200)).save(self.images / f'{i:02d}.jpg')
+        self.load_images()
+        from ui.qt.controller import PRELOAD_FORWARD, PRELOAD_BACKWARD
+        self.app._project.goto_image(4)
+        self.app._show_current_image_async()
+        self.wait(lambda: self.app._canvas._current_image is self.app._project.image_list[4])
+        self.app._preload_window_async(4)
+        expected = self.app._project.image_list[max(0, 4 - PRELOAD_BACKWARD):5 + PRELOAD_FORWARD]
+        self.wait(lambda: all(item.is_loaded for item in expected))
+        for item in expected:
+            self.assertIsNotNone(self.app._image_loader.get_cached(item.path))
+
+    def test_deleting_images_and_refresh_after_external_changes(self):
+        Image.new('RGB', (320, 200)).save(self.images / '03.jpg')
+        self.load_images()
+        with patch('ui.qt.controller.askyesno', return_value=True):
+            self.app._delete_image(0)
+        self.wait(lambda: self.app._thumb_panel.model.rowCount() == 2 and self.app._canvas._current_image.path.name == '02.jpg')
+        self.assertFalse(self.paths[0].exists())
+        self.assertEqual(self.app._thumb_panel.full_indices(), [0, 1])
+        (self.images / '03.jpg').unlink()
+        Image.new('RGB', (320, 200)).save(self.images / '04.jpg')
+        QTest.mouseClick(self.app._thumb_panel.refresh_button, Qt.MouseButton.LeftButton)
+        self.wait(lambda: not self.app._directory_loading)
+        self.assertEqual([item.name for item in self.app._thumb_panel.items], ['02.jpg', '04.jpg'])
+        self.assertEqual(self.app._label_manager.count(), 2)
+        (self.images / '04.jpg').unlink()
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_F5)
+        self.wait(lambda: not self.app._directory_loading)
+        self.assertEqual(self.app._thumb_panel.model.rowCount(), 1)
+        with patch('ui.qt.controller.askyesno', return_value=True):
+            self.app._delete_image(0)
+        self.assertEqual(self.app._thumb_panel.model.rowCount(), 0)
+        self.assertIsNone(self.app._canvas._current_image)
+
+    def test_batch_prediction_uses_current_filter_and_saves_each_result(self):
+        target = preferred_annotation_txt_path(self.paths[0])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('0 .5 .5 .2 .2\n', encoding='utf-8')
+        self.load_images()
+        self.app._apply_image_filter(ImageFilter.UNANNOTATED)
+        self.assertEqual(self.app._thumb_panel.full_indices(), [1])
+        self.app._pre_annotator._model = Mock()
+        self.app._pre_annotator._model_path = str(self.root / 'model.pt')
+        with patch.object(self.app._pre_annotator, 'predict', return_value=[BBox(10, 10, 80, 80, 1, 'person', .8)]) as predict, \
+                patch('ui.qt.controller.askyesno', return_value=True):
+            QTest.mouseClick(self.app._toolbar.batch, Qt.MouseButton.LeftButton)
+            self.wait(lambda: not self.app._toolbar._batch_running)
+        self.assertEqual(predict.call_args.args[0], self.paths[1])
+        self.assertEqual(predict.call_count, 1)
+        self.assertTrue(preferred_annotation_txt_path(self.paths[1]).read_text(encoding='utf-8').startswith('1 '))
+        self.assertTrue(target.read_text(encoding='utf-8').startswith('0 '))
+
+    def test_restore_prompt_restores_image_and_detects_labels_again(self):
+        self.app._config.last_directory = str(self.images)
+        self.app._config.last_image_path = str(self.paths[1])
+        self.app._config.last_image_index = 1
+        self.app._config.last_weights_file = ''
+        with patch('ui.qt.controller.RestoreDirectoryDialog', return_value=SimpleNamespace(result='restore')) as prompt:
+            self.app._restore_session()
+        self.wait(lambda: self.app._canvas._current_image is not None and self.app._canvas._current_image.path == self.paths[1])
+        prompt.assert_called_once_with(self.app, str(self.images))
+        self.assertEqual(self.app._label_manager.count(), 2)
+
+    def test_auto_detection_one_line_set_excludes_coordinate_txt(self):
+        (self.images / 'classes.txt').unlink()
+        (self.images / 'classes_boxes.txt').write_text('0: deer 0.5 0.5 0.2 0.2\n', encoding='utf-8')
+        (self.images / 'species.txt').write_text('0: fox\n', encoding='utf-8')
+        self.load_images()
+        self.assertEqual(self.app._label_manager.get_name(0), 'fox')
+        self.assertEqual(self.app._label_manager.count(), 1)
+
+    def test_theme_switch_preserves_work_and_is_persisted(self):
+        from core.config import ConfigManager
+        self.load_images()
+        self.drag(self.canvas_point(30, 30), self.canvas_point(100, 100))
+        current = self.app._project.current_image
+        boxes = list(current.annotations)
+        self.app._set_theme('light')
+        self.runtime.processEvents()
+        self.assertIs(self.app._canvas._current_image, current)
+        self.assertEqual(current.annotations, boxes)
+        self.assertTrue(current.is_dirty)
+        self.assertEqual(ConfigManager(str(self.config)).load().ui_theme, 'light')
+        self.app._set_theme('dark')
+
+    def test_legacy_switch_saves_and_failed_save_does_not_switch(self):
+        self.load_images()
+        self.drag(self.canvas_point(30, 30), self.canvas_point(100, 100))
+        with patch('ui.qt.controller.write_yolo_annotations_atomic', side_effect=OSError('test failure')), \
+                patch('ui.qt.controller.showerror'):
+            self.app._request_ui_switch()
+        self.assertIsNone(self.app._requested_ui)
+        self.assertTrue(self.app.isVisible())
+        self.app._request_ui_switch()
+        self.assertEqual(self.app._requested_ui, 'legacy')
+        self.assertTrue(preferred_annotation_txt_path(self.paths[0]).exists())
 
     def test_text_inputs_keep_typing_semantics_and_global_save(self):
         self.load_images()

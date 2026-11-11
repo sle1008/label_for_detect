@@ -568,6 +568,8 @@ class AnnotationApp(tk.Tk):
             command=lambda: self._set_label_display_mode(LABEL_MODE_HIDDEN),
         )
         view_menu.add_cascade(label='标签显示 (T 循环)', menu=label_mode_menu)
+        view_menu.add_separator()
+        view_menu.add_command(label='切换到现代界面（保存并重开）', command=self._request_ui_switch)
         menubar.add_cascade(label='视图', menu=view_menu)
         
         # Annotation menu
@@ -4204,6 +4206,20 @@ Escape      取消绘制 / 取消选中
         showinfo(self, '关于', '目标检测标注工具 v1.0\n\n支持格式: YOLO, COCO, Pascal VOC\n预标注: YOLO (ultralytics)')
     
     # --- Cleanup ---
+
+    def _request_ui_switch(self):
+        """保存成功后交还启动器，由启动器创建目标界面，避免重复打开进程。"""
+        if (self._pre_annotator.is_busy or self._weights_load_in_progress
+                or self._video_export_running or self._image_export_running or self._directory_loading
+                or self._pending_video_generation is not None or self._video_delete_running):
+            self._status_bar.warning('请等待当前推理、导出或加载任务完成，再切换界面')
+            return
+        previous = self._config.ui_backend
+        self._config.ui_backend = 'modern'
+        if self._on_close():
+            self._requested_ui = 'modern'
+        else:
+            self._config.ui_backend = previous
     
     def _on_close(self):
         """Handle window close."""
@@ -4233,3 +4249,4 @@ Escape      取消绘制 / 取消选中
 
         self._image_loader.shutdown()
         self.destroy()
+        return True
