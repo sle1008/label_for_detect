@@ -108,11 +108,11 @@ class CommandBar(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = FlowLayout(self)
         for text, graphic, tooltip, action in [
+            ('前框', 'prev', '选择前一个标注框（Q）', app._prev_bbox),
+            ('后框', 'next', '选择后一个标注框（E）', app._next_bbox),
             ('撤回', 'undo', '撤回（Ctrl+Z）', app._undo),
             ('重做', 'redo', '重做（Ctrl+Y）', app._redo),
             ('删除', 'trash', '删除选中标注（Delete）', app._delete_selected),
-            ('前框', 'prev', '选择前一个标注框（Q）', app._prev_bbox),
-            ('后框', 'next', '选择后一个标注框（E）', app._next_bbox),
             ('适应', 'fit', '适应窗口（F）', app._fit_window),
             ('旋转', 'rotate', '旋转 180°（R）', app._rotate_current_image),
             ('标签', 'label', '切换标签显示（T）', app._cycle_label_mode),
@@ -126,11 +126,9 @@ class CommandBar(QFrame):
         set_button_icon(self.infer, 'spark')
         self.infer.setToolTip('推理当前图片或完整视频（Ctrl+X）')
         self.infer.clicked.connect(app._pre_annotate_current)
-        layout.addWidget(self.infer)
         self.batch = QPushButton('批量推理')
         self.batch.setToolTip('批量推理当前筛选中的图片（Ctrl+Shift+X）')
         self.batch.clicked.connect(lambda: app._stop_batch_pre_annotate() if self._batch_running else app._batch_pre_annotate())
-        layout.addWidget(self.batch)
 
     def set_batch_running(self, running):
         self._batch_running = running
@@ -253,6 +251,9 @@ class AnnotationApp(QMainWindow, ApplicationController):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(8)
         self._toolbar = CommandBar(self)
+        # 推理操作紧随标签导入，编辑栏集中保留画布和标注框操作。
+        header.insertWidget(3, self._toolbar.infer)
+        header.insertWidget(4, self._toolbar.batch)
         center_layout.addWidget(self._toolbar)
         canvas_frame = QFrame()
         canvas_frame.setObjectName('panel')
