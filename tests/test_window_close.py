@@ -69,7 +69,7 @@ class WindowCloseTests(unittest.TestCase):
         return item
 
     def test_close_before_opening_video_destroys_window(self):
-        self.assertIsNone(self.app._video_pause_event)
+        self.assertIsNone(self.app._video_player)
         with patch.object(self.app, 'destroy', wraps=self.app.destroy) as destroy:
             self._click_close()
         destroy.assert_called_once()
@@ -97,18 +97,15 @@ class WindowCloseTests(unittest.TestCase):
 
     def test_close_signals_video_events_and_releases_capture(self):
         stop_event = threading.Event()
-        pause_event = threading.Event()
         open_stop_event = threading.Event()
-        capture = Mock()
-        self.app._video_stop_event = stop_event
-        self.app._video_pause_event = pause_event
+        player = Mock()
+        self.app._video_inference_stop_event = stop_event
         self.app._video_open_stop_event = open_stop_event
-        self.app._video_capture = capture
+        self.app._video_player = player
         self._click_close()
         self.assertTrue(stop_event.is_set())
-        self.assertTrue(pause_event.is_set())
         self.assertTrue(open_stop_event.is_set())
-        capture.release.assert_called_once()
+        player.close.assert_called_once()
 
 
 if __name__ == '__main__':

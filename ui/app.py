@@ -1,6 +1,7 @@
 """Main application window."""
 
 import os
+import math
 import sys
 import queue
 import threading
@@ -21,6 +22,7 @@ from core.project import Project, ImageFilter
 from core.undo_redo import UndoRedoManager, Command, CompoundCommand
 from core.config import AppConfig, ConfigManager
 from io_ops.image_loader import AsyncImageLoader
+from io_ops.video_player import VideoPlayer, DEFAULT_VIDEO_FPS
 from io_ops.label_file_parser import load_annotation_file
 from io_ops.label_set_detector import iter_label_set_candidates
 from io_ops.yolo_exporter import export_yolo
@@ -28,6 +30,7 @@ from io_ops.coco_exporter import export_coco
 from io_ops.voc_exporter import export_voc
 from io_ops.pre_annotator import (
     PreAnnotator,
+    VideoPrediction,
     DEFAULT_INFERENCE_MODE,
     INFERENCE_MODE_BACKEND_AUTO,
     INFERENCE_MODE_ONE_TO_ONE,
@@ -83,9 +86,10 @@ from utils.constants import (
 RECENT_LABEL_LIMIT = 4
 LABEL_FILTER_ITEMS_PER_COLUMN = 40
 VIDEO_FRAME_POLL_MS = 15
-VIDEO_INFERENCE_MAX_FPS = 30
 VIDEO_FILETYPES = [('视频文件', '*.mp4 *.avi *.mov *.mkv *.wmv *.m4v'), ('所有文件', '*.*')]
 VIDEO_SUPPORTED_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
+# 图片显示方向的快捷键，便于在画布聚焦时快速操作。
+ROTATE_IMAGE_SHORTCUT = 'r'
 
 
 def update_recent_class_ids(recent_class_ids: List[int], class_id: int,
@@ -145,21 +149,23 @@ class AnnotationApp(tk.Tk):
         self._label_filter_var = tk.StringVar(value='全部标签')
         self._label_filter_display_to_id = {'全部标签': None}
         self._label_filter_popup = None
-        self._video_capture = None
+        self._video_player = None
         self._video_path = ''
         self._pending_video_generation = None
         self._video_open_stop_event = None
         self._video_duration = 0.0
         self._video_fps = 0.0
         self._video_frame_index = 0
+        self._video_frame_count = 0
         self._video_playing = False
+        self._video_speed = 1.0
+        self._video_seek_active = False
+        self._video_resume_after_seek = False
+        self._video_annotations = None
+        self._video_inference_running = False
+        self._video_inference_stop_event = None
+        self._video_error_reported = False
         self._video_generation = 0
-        self._video_stop_event = None
-        # 视频控制事件在打开视频后创建，空闲状态下保留空值供统一清理流程使用。
-        self._video_pause_event = None
-        self._video_seek_request = None
-        self._video_state_lock = threading.Lock()
-        self._video_result_queue = queue.Queue(maxsize=1)
         self._video_poll_after_id = None
         
         # Apply saved geometry
@@ -287,6 +293,8 @@ class AnnotationApp(tk.Tk):
             self._center_wrap,
             on_toggle_play=self._toggle_video_play,
             on_seek=self._seek_video,
+            on_seek_start=self._begin_video_seek,
+            on_speed_changed=self._set_video_speed,
         )
         self._video_controls.pack(fill='x', side='bottom')
         self._video_controls.pack_forget()
@@ -1304,6 +1312,8 @@ class AnnotationApp(tk.Tk):
         self.bind('<Control-G>', lambda e: self._jump_to_image())
         self.bind('<f>', lambda e: self._fit_window())
         self.bind('<F>', lambda e: self._fit_window())
+        self.bind(f'<{ROTATE_IMAGE_SHORTCUT}>', lambda e: self._rotate_current_image())
+        self.bind(f'<{ROTATE_IMAGE_SHORTCUT.upper()}>', lambda e: self._rotate_current_image())
         self.bind('<Escape>', lambda e: self._canvas.cancel_or_deselect())
         self.bind('<Control-x>', lambda e: self._pre_annotate_current())
         self.bind('<Control-X>', lambda e: self._batch_pre_annotate())
@@ -2666,7 +2676,7 @@ class AnnotationApp(tk.Tk):
             self._show_current_image_async()
 
     def _open_video(self):
-        """打开视频并使用当前已加载的预标注权重逐帧检测。"""
+        """读取视频并预览首帧，逐帧推理由 Ctrl+X 单独启动。"""
         path = filedialog.askopenfilename(
             title='选择视频文件', filetypes=VIDEO_FILETYPES, parent=self,
         )
@@ -2674,12 +2684,6 @@ class AnnotationApp(tk.Tk):
             return
         if Path(path).suffix.lower() not in VIDEO_SUPPORTED_EXTENSIONS:
             self._status_bar.warning('所选文件格式不是支持的视频格式')
-            return
-        if not self._pre_annotator.is_loaded:
-            self._status_bar.warning('请先加载预标注权重，再打开视频')
-            return
-        if self._pre_annotator.is_busy or self._weights_load_in_progress:
-            self._status_bar.warning('预标注任务正在运行，请稍后再播放视频')
             return
         if (self._video_path or self._pending_video_generation is not None) and self._project.current_image:
             if not self._save_before_navigate():
@@ -2696,25 +2700,33 @@ class AnnotationApp(tk.Tk):
         self._video_open_stop_event = open_stop_event
 
         def worker():
-            import cv2
+            capture = None
+            try:
+                import cv2
 
-            capture = cv2.VideoCapture(path)
-            if open_stop_event.is_set():
-                capture.release()
-                return
-            if not capture.isOpened():
-                capture.release()
+                capture = cv2.VideoCapture(path)
+                if open_stop_event.is_set():
+                    capture.release()
+                    return
+                if not capture.isOpened():
+                    raise RuntimeError('无法打开视频')
+                fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+                frame_count = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+                if not math.isfinite(fps) or fps <= 0:
+                    fps = DEFAULT_VIDEO_FPS
+                duration = frame_count / fps if frame_count > 0 else 0.0
+                if open_stop_event.is_set():
+                    capture.release()
+                    return
+                self._call_in_main(
+                    lambda cap=capture, rate=fps, length=duration, count=frame_count:
+                    self._video_opened(generation, path, cap, rate, length, count)
+                )
+            except Exception as exc:
+                if capture is not None:
+                    capture.release()
+                print(f'Video open error: {exc}')
                 self._call_in_main(lambda: self._video_open_failed(generation, path))
-                return
-            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            if fps <= 0:
-                fps = 25.0
-            duration = frame_count / fps if frame_count > 0 else 0.0
-            self._call_in_main(
-                lambda cap=capture, rate=fps, length=duration, count=frame_count:
-                self._video_opened(generation, path, cap, rate, length, count)
-            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2722,6 +2734,7 @@ class AnnotationApp(tk.Tk):
         if generation != self._video_generation or self._pending_video_generation != generation:
             return
         self._pending_video_generation = None
+        self._video_open_stop_event = None
         showerror(self, '视频打开失败', f'无法打开视频文件：\n{path}')
         self._status_bar.error(f'无法打开视频: {Path(path).name}')
 
@@ -2731,204 +2744,128 @@ class AnnotationApp(tk.Tk):
             return
         self._pending_video_generation = None
         self._video_open_stop_event = None
-        if self._video_stop_event is not None:
-            self._video_stop_event.set()
-        old_capture = self._video_capture
-        if old_capture is not None:
-            old_capture.release()
-        self._video_capture = capture
+        self._video_player = VideoPlayer(capture, fps, frame_count)
         self._video_path = path
         self._video_fps = fps
         self._video_duration = duration
         self._video_frame_index = 0
-        with self._video_state_lock:
-            self._video_playing = True
+        self._video_frame_count = frame_count
+        self._video_playing = False
+        self._video_speed = 1.0
         self._video_controls.pack(fill='x', side='bottom')
         self._video_controls.set_duration(duration)
         self._video_controls.set_enabled(True)
-        self._video_controls.set_playing(True)
-        self._video_stop_event = threading.Event()
-        with self._video_state_lock:
-            self._video_seek_request = None
-        self._video_pause_event = threading.Event()
-        self._video_pause_event.set()
-        while True:
-            try:
-                self._video_result_queue.get_nowait()
-            except queue.Empty:
-                break
-        self._status_bar.set_info(f'视频播放中: {Path(path).name}')
-        self._start_video_worker(generation, capture, fps, frame_count, self._video_stop_event)
+        self._video_controls.set_playing(False)
+        self._video_controls.set_speed(self._video_speed)
+        self._status_bar.set_info(f'视频已读取: {Path(path).name}，按 Ctrl+X 开始逐帧推理')
         self._schedule_video_result_poll()
-
-    def _start_video_worker(self, generation, capture, fps, frame_count, stop_event):
-        """后台解码并推理，主线程仅负责显示最新完成帧。"""
-        interval = 1.0 / min(max(fps, 1.0), VIDEO_INFERENCE_MAX_FPS)
-        model = self._pre_annotator._model
-        label_manager = self._label_manager
-
-        def worker():
-            import cv2
-
-            while True:
-                if stop_event.is_set():
-                    break
-                started = time.perf_counter()
-                with self._video_state_lock:
-                    seek = self._video_seek_request
-                    if seek is not None:
-                        self._video_seek_request = None
-                        self._video_playing = True
-                        self._video_pause_event.set()
-                if seek is not None:
-                    self._call_in_main(lambda: self._set_video_play_button(True))
-                if seek is not None:
-                    target = max(0, int(seek * fps))
-                    if frame_count > 0:
-                        target = min(target, frame_count - 1)
-                    capture.set(cv2.CAP_PROP_POS_FRAMES, target)
-                ok, frame = capture.read()
-                if not ok:
-                    self._call_in_main(lambda: self._video_reached_end(generation))
-                    break
-                frame_index = max(0, int(capture.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
-                height, width = frame.shape[:2]
-                try:
-                    results = model(
-                        frame[:, :, ::-1],
-                        conf=self._threshold,
-                        verbose=False,
-                        **({'end2end': True}
-                           if self._pre_annotator.inference_mode == INFERENCE_MODE_ONE_TO_ONE
-                           else {}),
-                    )
-                    annotations = self._pre_annotator._results_to_bboxes(
-                        results, label_manager,
-                    )
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    from PIL import Image
-                    image = Image.fromarray(frame_rgb)
-                except Exception as exc:
-                    print(f'Video frame processing error: {exc}')
-                    continue
-                position = frame_index / fps
-                with self._video_state_lock:
-                    current_seek = self._video_seek_request
-                if stop_event.is_set():
-                    break
-                if current_seek is not None:
-                    continue
-                result = (generation, image, annotations, frame_index, position, width, height)
-                try:
-                    self._video_result_queue.put_nowait(result)
-                except queue.Full:
-                    try:
-                        self._video_result_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        self._video_result_queue.put_nowait(result)
-                    except queue.Full:
-                        pass
-                with self._video_state_lock:
-                    is_playing = self._video_playing
-                if not is_playing:
-                    if stop_event.wait(0.02):
-                        break
-                else:
-                    self._video_pause_event.set()
-                    remaining = max(0.0, interval - (time.perf_counter() - started))
-                    if stop_event.wait(min(remaining, 0.05)):
-                        break
-                    if remaining > 0.05:
-                        stop_event.wait(remaining - 0.05)
-                if stop_event.is_set():
-                    break
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _schedule_video_result_poll(self):
         if self._video_poll_after_id is None:
             self._video_poll_after_id = self.after(VIDEO_FRAME_POLL_MS, self._poll_video_result)
 
-    def _set_video_play_button(self, playing):
-        """在主线程中同步视频播放按钮状态。"""
-        if self._video_path:
-            self._video_controls.set_playing(playing)
-
     def _poll_video_result(self):
         self._video_poll_after_id = None
-        try:
-            result = self._video_result_queue.get_nowait()
-        except queue.Empty:
-            result = None
+        player = self._video_player
+        if not player or not self._video_path:
+            return
+        result = player.take_frame()
         if result is not None:
-            generation, frame, annotations, index, position, width, height = result
-            if generation == self._video_generation and self._video_path:
-                self._video_frame_index = index
-                self._canvas.show_video_frame(frame, annotations)
-                self._video_controls.set_position(position)
+            self._video_frame_index = result.index
+            position = result.index / player.fps
+            annotations = self._video_annotations_for_frame(result.index)
+            self._canvas.show_video_frame(result.image, annotations)
+            self._video_controls.set_position(position)
+            if not self._video_inference_running:
+                state = '推理完成' if self._video_annotations is not None else '未推理，按 Ctrl+X'
                 self._status_bar.set_overlay(
-                    f'视频: {Path(self._video_path).name} | {width}x{height} | '
+                    f'视频: {Path(self._video_path).name} | {result.image.width}x{result.image.height} | '
                     f'{self._video_controls._format_time(position)} / '
                     f'{self._video_controls._format_time(self._video_duration)} | '
-                    f'检测框: {len(annotations)}'
+                    f'{state} | 检测框: {len(annotations)} | {self._video_speed:g}x'
                 )
-        if self._video_path:
-            self._schedule_video_result_poll()
+        playing = player.playing
+        if playing != self._video_playing:
+            self._video_playing = playing
+            self._video_controls.set_playing(playing)
+        if player.error and not self._video_error_reported:
+            self._video_error_reported = True
+            self._status_bar.error(f'视频播放失败: {player.error}')
+        self._schedule_video_result_poll()
+
+    def _video_annotations_for_frame(self, index):
+        """检测框与解码画面通过原始帧号对应，空帧也占用缓存位置。"""
+        cache = self._video_annotations
+        return cache[index] if cache is not None and 0 <= index < len(cache) else []
 
     def _toggle_video_play(self):
-        if not self._video_path or self._video_stop_event is None:
+        player = self._video_player
+        if not player or self._video_inference_running:
             return
-        with self._video_state_lock:
-            self._video_playing = not self._video_playing
-            playing = self._video_playing
-            if playing and self._video_duration > 0:
-                frame_duration = 1.0 / max(self._video_fps, 1.0)
-                current_position = self._video_frame_index * frame_duration
-                if current_position >= self._video_duration - frame_duration:
-                    self._video_seek_request = 0.0
-        if playing:
-            self._video_pause_event.set()
+        if player.playing:
+            player.pause(self._video_frame_index)
         else:
-            self._video_pause_event.clear()
-        self._video_controls.set_playing(playing)
+            player.play(self._video_frame_index)
+        self._video_playing = player.playing
+        self._video_controls.set_playing(self._video_playing)
+
+    def _begin_video_seek(self):
+        player = self._video_player
+        if not player or self._video_inference_running:
+            return
+        self._video_seek_active = True
+        self._video_resume_after_seek = player.playing
+        player.pause(self._video_frame_index)
+        self._video_playing = False
+        self._video_controls.set_playing(False)
 
     def _seek_video(self, position):
-        if self._video_path and self._video_stop_event is not None:
-            with self._video_state_lock:
-                self._video_seek_request = max(0.0, min(position, self._video_duration))
-                self._video_playing = False
-            self._video_pause_event.clear()
-            return 'break'
+        player = self._video_player
+        if not player or self._video_inference_running:
+            return
+        playing = self._video_resume_after_seek if self._video_seek_active else player.playing
+        self._video_seek_active = False
+        position = max(0.0, min(position, self._video_duration))
+        self._video_frame_index = min(int(position * player.fps),
+                                      max(0, self._video_frame_count - 1))
+        player.seek(position, playing=playing)
+        self._video_playing = playing
+        self._video_controls.set_playing(playing)
+        return 'break'
 
-    def _video_reached_end(self, generation):
-        if generation == self._video_generation and self._video_path:
-            with self._video_state_lock:
-                self._video_playing = False
-            self._video_controls.set_playing(False)
+    def _set_video_speed(self, speed):
+        if not self._video_player or self._video_inference_running:
+            return
+        self._video_speed = speed
+        self._video_player.set_speed(speed, self._video_frame_index)
+        self._video_controls.set_speed(speed)
 
     def _stop_video(self, clear_canvas=True):
         """停止后台解码并释放视频资源。"""
         self._video_generation += 1
-        if self._video_stop_event is not None:
-            self._video_stop_event.set()
-        if self._video_pause_event is not None:
-            self._video_pause_event.set()
+        if self._video_inference_stop_event is not None:
+            self._video_inference_stop_event.set()
+            self._video_inference_stop_event = None
+        if self._video_inference_running:
+            self._status_bar.hide_progress()
+            self._toolbar.set_batch_running(False)
+        self._video_inference_running = False
         if self._video_open_stop_event is not None:
             self._video_open_stop_event.set()
             self._video_open_stop_event = None
         self._pending_video_generation = None
-        capture = self._video_capture
-        self._video_capture = None
-        if capture is not None:
-            capture.release()
-        self._video_stop_event = None
-        self._video_pause_event = None
+        player = self._video_player
+        self._video_player = None
+        if player is not None:
+            player.close()
         self._video_path = ''
-        with self._video_state_lock:
-            self._video_playing = False
-            self._video_seek_request = None
+        self._video_playing = False
+        self._video_seek_active = False
+        self._video_resume_after_seek = False
+        self._video_annotations = None
+        self._video_frame_count = 0
+        self._video_frame_index = 0
+        self._video_error_reported = False
         self._video_duration = 0.0
         self._video_fps = 0.0
         self._video_controls.set_playing(False)
@@ -2940,11 +2877,6 @@ class AnnotationApp(tk.Tk):
             except tk.TclError:
                 pass
             self._video_poll_after_id = None
-        while True:
-            try:
-                self._video_result_queue.get_nowait()
-            except queue.Empty:
-                break
         if clear_canvas:
             self._canvas.clear_all()
         self._update_window_title()
@@ -3282,7 +3214,7 @@ class AnnotationApp(tk.Tk):
         self._threshold = value
         self._config.confidence_threshold = value
         if self._video_path:
-            self._seek_video(self._video_controls.get_position())
+            self._status_bar.warning('阈值已更新，按 Ctrl+X 重新推理视频以应用新阈值')
     
     def _quick_select_class(self, index: int):
         """Quick select class by number key (1-9)."""
@@ -3470,6 +3402,10 @@ class AnnotationApp(tk.Tk):
         self._canvas.fit_to_window()
         self._on_zoom_changed(self._canvas._scale)
 
+    def _rotate_current_image(self):
+        """切换当前静态图片的显示方向，标注仍对应原图坐标。"""
+        self._canvas.toggle_rotation_180()
+
     def _cycle_label_mode(self):
         """Cycle bbox label display mode (toolbar button / T key)."""
         prev = self._canvas.label_mode
@@ -3581,6 +3517,9 @@ class AnnotationApp(tk.Tk):
     
     def _pre_annotate_current(self):
         """Run pre-annotation on current image (background thread)."""
+        if self._pending_video_generation is not None:
+            self._status_bar.warning('视频正在读取，请稍候...')
+            return
         if self._weights_load_in_progress:
             self._status_bar.warning('预标注权重正在加载，请稍候...')
             return
@@ -3591,6 +3530,10 @@ class AnnotationApp(tk.Tk):
         if not self._pre_annotator.is_loaded:
             showinfo(self, '提示', '请先加载权重文件')
             self._load_weights()
+            return
+
+        if self._video_path:
+            self._pre_annotate_video()
             return
         
         item = self._project.current_image
@@ -3643,6 +3586,64 @@ class AnnotationApp(tk.Tk):
             item.path, self._threshold, self._label_manager,
             on_done, main_thread_schedule=self._call_in_main,
         )
+
+    def _pre_annotate_video(self):
+        """完成整个视频的逐帧推理后发布缓存，预览始终使用对应帧的结果。"""
+        player = self._video_player
+        if not player or self._video_inference_running:
+            return
+        generation = self._video_generation
+        player.pause(self._video_frame_index)
+        self._video_playing = False
+        self._video_seek_active = False
+        self._video_inference_running = True
+        self._video_annotations = None
+        self._video_controls.set_playing(False)
+        self._video_controls.set_enabled(False)
+        self._toolbar.set_batch_running(True)
+        self._status_bar.show_progress(0)
+        self._status_bar.set_info('正在逐帧推理视频，完成后可播放带检测框和置信度的画面...')
+
+        def on_progress(current, total):
+            if generation != self._video_generation or not self._video_inference_running:
+                return
+            self._status_bar.update_progress(100 * current / total if total else 0)
+            count = f'{current}/{total}' if total else str(current)
+            self._status_bar.set_overlay(f'视频逐帧推理中: {count} 帧')
+
+        def on_done(result):
+            if generation != self._video_generation or self._video_player is not player:
+                return
+            self._video_inference_running = False
+            self._video_inference_stop_event = None
+            self._video_controls.set_enabled(True)
+            self._toolbar.set_batch_running(False)
+            self._status_bar.hide_progress()
+            if result.cancelled:
+                self._status_bar.warning('视频推理已停止，未应用不完整结果；按 Ctrl+X 可重新推理')
+                return
+            if result.error:
+                self._status_bar.error(f'视频推理失败: {result.error}')
+                return
+            self._video_annotations = result.annotations
+            self._video_frame_count = len(result.annotations)
+            player.set_frame_count(self._video_frame_count)
+            self._video_duration = self._video_frame_count / player.fps
+            self._video_controls.set_duration(self._video_duration)
+            self._video_frame_index = 0
+            player.seek(0.0, playing=False)
+            self._status_bar.success(
+                f'视频推理完成: 共 {self._video_frame_count} 帧，'
+                f'耗时 {format_duration(result.elapsed)}；点击播放查看检测框和置信度'
+            )
+
+        try:
+            self._video_inference_stop_event = self._pre_annotator.predict_video_async(
+                self._video_path, self._threshold, self._label_manager, on_done,
+                progress_callback=on_progress, main_thread_schedule=self._call_in_main,
+            )
+        except Exception as exc:
+            on_done(VideoPrediction([], 0.0, error=str(exc)))
     
     def _apply_batch_annotations_to_item(self, item: ImageItem, annotations: list):
         """Replace one image's annotations with its batch prediction result."""
@@ -3662,6 +3663,9 @@ class AnnotationApp(tk.Tk):
     
     def _batch_pre_annotate(self):
         """Run batch pre-annotation on images in the current filter (background thread)."""
+        if self._video_path or self._pending_video_generation is not None:
+            self._pre_annotate_current()
+            return
         if self._weights_load_in_progress:
             self._status_bar.warning('预标注权重正在加载，请稍候...')
             return
@@ -3746,7 +3750,8 @@ class AnnotationApp(tk.Tk):
             self._status_bar.info('当前没有进行中的批量预标注')
             return
         self._pre_annotator.cancel()
-        self._status_bar.info('正在停止批量预标注...')
+        self._status_bar.info('正在停止视频推理...' if self._video_inference_running
+                              else '正在停止批量预标注...')
     
     # --- Export ---
     
@@ -3830,6 +3835,7 @@ class AnnotationApp(tk.Tk):
 快捷键说明:
 ═══════════════════════════
 Ctrl+O      打开目录
+Ctrl+Shift+O 打开视频
 Ctrl+S      保存
 Ctrl+Shift+S 导出
 Ctrl+Z      撤销（先当前图编辑，再恢复上一张图）
@@ -3846,9 +3852,10 @@ Ctrl+G      跳转到指定图片
 Q / E       上一个/下一个锚框
 F           适应窗口
 T           切换标签显示(全部→精简→隐藏)
+R           当前图片旋转180°(再次按下恢复)
 滚轮        缩放
 中键/空格+拖拽  平移
-Ctrl+X      预标注当前图
+Ctrl+X      预标注当前图 / 视频逐帧推理
 Ctrl+Shift+X 批量预标注
 Ctrl+点击   多选/取消选择
 右键拖拽    框选多个锚框

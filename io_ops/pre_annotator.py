@@ -2,6 +2,7 @@
 
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Dict, Set
 
@@ -18,6 +19,17 @@ INFERENCE_MODE_ONE_TO_MANY_NMS = 'one-to-many+NMS'
 INFERENCE_MODE_BACKEND_AUTO = 'backend-auto'
 DEFAULT_INFERENCE_MODE = INFERENCE_MODE_ONE_TO_MANY_NMS
 SUPPORTED_WEIGHT_EXTENSIONS: Set[str] = {'.pt', '.onnx', '.engine', '.trt'}
+VIDEO_PROGRESS_INTERVAL_SECONDS = 0.1
+
+
+@dataclass
+class VideoPrediction:
+    """完整的视频标注缓存；失败或取消时不暴露部分结果。"""
+
+    annotations: list
+    elapsed: float
+    cancelled: bool = False
+    error: str = ''
 
 
 class PreAnnotator:
@@ -251,24 +263,93 @@ class PreAnnotator:
             return []
 
     def predict_frame(self, frame, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-                      label_manager: LabelManager = None) -> List[BBox]:
+                      label_manager: LabelManager = None,
+                      raise_on_error: bool = False) -> List[BBox]:
         """使用当前模型推理单个内存视频帧。"""
         if not self._model:
             return []
         try:
-            frame_rgb = frame
-            if getattr(frame, 'ndim', 0) == 3 and frame.shape[2] >= 3:
-                frame_rgb = frame[:, :, ::-1]
             if not self._busy:
                 self._configure_inference_mode()
             predict_options = {'conf': threshold, 'verbose': False}
             if self._inference_mode == INFERENCE_MODE_ONE_TO_ONE:
                 predict_options['end2end'] = True
-            results = self._model(frame_rgb, **predict_options)
+            # OpenCV 和 Ultralytics 的 NumPy 输入均使用 BGR，显示时再转为 RGB。
+            results = self._model(frame, **predict_options)
             return self._results_to_bboxes(results, label_manager)
         except Exception as exc:
+            if raise_on_error:
+                raise
             print(f'Video frame prediction error: {exc}')
             return []
+
+    def predict_video_async(self, path, threshold, label_manager, done_callback,
+                            progress_callback=None, main_thread_schedule=None):
+        """顺序读取全部视频帧并缓存检测结果，与预览解码器独立。"""
+        if self._busy or not self.is_loaded:
+            raise RuntimeError('模型未就绪或另一个预标注任务正在运行')
+        self._configure_inference_mode()
+        labels = LabelManager()
+        labels.from_dict_list(label_manager.to_dict_list())
+        cancel_event = threading.Event()
+        self._cancel_event = cancel_event
+        self._busy = True
+
+        def dispatch(callback):
+            if main_thread_schedule:
+                main_thread_schedule(callback)
+            else:
+                callback()
+
+        def worker():
+            started = time.perf_counter()
+            capture = None
+            annotations = []
+            error = ''
+            try:
+                import cv2
+
+                capture = cv2.VideoCapture(str(path))
+                if not capture.isOpened():
+                    raise RuntimeError('无法打开视频进行推理')
+                total = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+                last_progress = started
+                while not cancel_event.is_set():
+                    ok, frame = capture.read()
+                    if not ok:
+                        break
+                    boxes = self.predict_frame(frame, threshold, labels, raise_on_error=True)
+                    if cancel_event.is_set():
+                        break
+                    annotations.append(boxes)
+                    now = time.perf_counter()
+                    if progress_callback and now - last_progress >= VIDEO_PROGRESS_INTERVAL_SECONDS:
+                        current = len(annotations)
+                        dispatch(lambda c=current, t=total: progress_callback(c, t))
+                        last_progress = now
+                if not cancel_event.is_set():
+                    if not annotations:
+                        raise RuntimeError('视频中没有可解码的画面')
+                    if total and len(annotations) < total:
+                        raise RuntimeError(
+                            f'视频解码提前结束，仅处理 {len(annotations)}/{total} 帧'
+                        )
+            except Exception as exc:
+                error = str(exc)
+            finally:
+                if capture is not None:
+                    capture.release()
+                self._busy = False
+            cancelled = cancel_event.is_set()
+            result = VideoPrediction(
+                annotations=[] if cancelled or error else annotations,
+                elapsed=time.perf_counter() - started,
+                cancelled=cancelled, error=error,
+            )
+            dispatch(lambda: done_callback(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return cancel_event
     
     def _results_to_bboxes(self, results, label_manager: LabelManager = None) -> List[BBox]:
         annotations = []

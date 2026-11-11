@@ -37,6 +37,13 @@ LABEL_MODE_NAMES = {
 # annotations can be cleared and redrawn without touching the image bitmap.
 ANNOTATION_TAG = 'annotation'
 
+# ==================== 画布参数设置区 ====================
+# 旋转后将屏幕方向的缩放手柄映射回原图方向，标注数据仍以原图坐标保存。
+ROTATED_HANDLE_MAP = {
+    'nw': 'se', 'ne': 'sw', 'sw': 'ne', 'se': 'nw',
+    'n': 's', 's': 'n', 'w': 'e', 'e': 'w',
+}
+
 
 class CanvasMode(Enum):
     IDLE = auto()
@@ -67,6 +74,8 @@ class AnnotationCanvas(tk.Canvas):
         self._mode = CanvasMode.IDLE
         self._current_image: Optional[ImageItem] = None
         self._source_pil_image: Optional[Image.Image] = None
+        self._rotated_pil_image: Optional[Image.Image] = None
+        self._rotation_180 = False
         self._video_frame_photo: Optional[ImageTk.PhotoImage] = None
         self._video_annotations: List[BBox] = []
         self._video_mode = False
@@ -183,6 +192,9 @@ class AnnotationCanvas(tk.Canvas):
     def set_image(self, image_item: ImageItem, pil_image: Image.Image = None):
         """Set the current image to display."""
         self._video_mode = False
+        if self._current_image is not image_item:
+            self._rotation_180 = False
+            self._rotated_pil_image = None
         self._current_image = image_item
         self._bbox_items.clear()
         self._hover_bbox_id = None
@@ -201,10 +213,26 @@ class AnnotationCanvas(tk.Canvas):
         self._source_pil_image = pil_image
         self.fit_to_window()
 
+    def toggle_rotation_180(self):
+        """Toggle the display orientation while keeping annotations in source coordinates."""
+        if not self._current_image or self._video_mode or not self._source_pil_image:
+            return False
+        self._rotation_180 = not self._rotation_180
+        if self._rotation_180:
+            self._rotated_pil_image = self._source_pil_image.transpose(
+                Image.Transpose.ROTATE_180
+            )
+        else:
+            self._rotated_pil_image = None
+        self._redraw(high_quality=True)
+        return True
+
     def show_video_frame(self, frame: Image.Image, annotations: List[BBox] = None):
         """显示视频帧和检测框，不接入静态图片的编辑状态。"""
         self._current_image = None
         self._video_mode = True
+        self._rotation_180 = False
+        self._rotated_pil_image = None
         self._bbox_items.clear()
         self._hover_bbox_id = None
         self._source_pil_image = frame
@@ -331,8 +359,10 @@ class AnnotationCanvas(tk.Canvas):
         self._photo_image = None
         self._video_frame_photo = None
         self._source_pil_image = None
+        self._rotated_pil_image = None
         self._current_image = None
         self._video_mode = False
+        self._rotation_180 = False
         self._video_annotations = []
     
     @property
@@ -349,13 +379,26 @@ class AnnotationCanvas(tk.Canvas):
         """Convert canvas coordinates to image pixel coordinates."""
         ix = (cx - self._offset_x) / self._scale
         iy = (cy - self._offset_y) / self._scale
+        if self._rotation_180 and self._source_pil_image:
+            ix = self._source_pil_image.width - ix
+            iy = self._source_pil_image.height - iy
         return ix, iy
     
     def image_to_canvas(self, ix: float, iy: float) -> Tuple[float, float]:
         """Convert image pixel coordinates to canvas coordinates."""
+        if self._rotation_180 and self._source_pil_image:
+            ix = self._source_pil_image.width - ix
+            iy = self._source_pil_image.height - iy
         cx = ix * self._scale + self._offset_x
         cy = iy * self._scale + self._offset_y
         return cx, cy
+
+    def _bbox_canvas_bounds(self, bbox: BBox) -> Tuple[float, float, float, float]:
+        """Return normalized canvas bounds for a box in original image coordinates."""
+        point1 = self.image_to_canvas(bbox.x1, bbox.y1)
+        point2 = self.image_to_canvas(bbox.x2, bbox.y2)
+        return (min(point1[0], point2[0]), min(point1[1], point2[1]),
+                max(point1[0], point2[0]), max(point1[1], point2[1]))
     
     def _schedule_redraw(self, high_quality: bool = False):
         """Debounce redraws during rapid zoom."""
@@ -391,7 +434,9 @@ class AnnotationCanvas(tk.Canvas):
         if not self._source_pil_image or not self._current_image:
             return
         
-        src_w, src_h = self._source_pil_image.size
+        display_source = (self._rotated_pil_image if self._rotation_180
+                          else self._source_pil_image)
+        src_w, src_h = display_source.size
         display_w = max(1, int(round(src_w * self._scale)))
         display_h = max(1, int(round(src_h * self._scale)))
         resample = Image.LANCZOS if high_quality else Image.BILINEAR
@@ -402,11 +447,11 @@ class AnnotationCanvas(tk.Canvas):
         if canvas_w <= 1 or canvas_h <= 1:
             # Canvas not realized yet: render the whole image (legacy path).
             if (display_w, display_h) != (src_w, src_h):
-                display_img = self._source_pil_image.resize(
+                display_img = display_source.resize(
                     (display_w, display_h), resample
                 )
             else:
-                display_img = self._source_pil_image
+                display_img = display_source
             self._photo_image = ImageTk.PhotoImage(display_img)
             self._image_id = self.create_image(
                 self._offset_x, self._offset_y,
@@ -427,9 +472,9 @@ class AnnotationCanvas(tk.Canvas):
 
                 full = (crop_x1, crop_y1, crop_x2, crop_y2) == (0, 0, src_w, src_h)
                 if full and (region_w, region_h) == (src_w, src_h):
-                    display_img = self._source_pil_image
+                    display_img = display_source
                 else:
-                    display_img = self._source_pil_image.resize(
+                    display_img = display_source.resize(
                         (region_w, region_h), resample,
                         box=(crop_x1, crop_y1, crop_x2, crop_y2),
                     )
@@ -496,8 +541,7 @@ class AnnotationCanvas(tk.Canvas):
         if self._label_manager:
             class_color = self._label_manager.get_color(bbox.class_id)
         
-        cx1, cy1 = self.image_to_canvas(bbox.x1, bbox.y1)
-        cx2, cy2 = self.image_to_canvas(bbox.x2, bbox.y2)
+        cx1, cy1, cx2, cy2 = self._bbox_canvas_bounds(bbox)
         
         if bbox.is_selected:
             outline_color = '#ffffff'
@@ -649,14 +693,14 @@ class AnnotationCanvas(tk.Canvas):
             self._mode = CanvasMode.IDLE
             return
         
-        sel_x1, sel_y1 = self.canvas_to_image(
-            min(self._sel_start[0], event.x),
-            min(self._sel_start[1], event.y),
+        selection_points = (
+            self.canvas_to_image(*self._sel_start),
+            self.canvas_to_image(event.x, event.y),
         )
-        sel_x2, sel_y2 = self.canvas_to_image(
-            max(self._sel_start[0], event.x),
-            max(self._sel_start[1], event.y),
-        )
+        sel_x1 = min(point[0] for point in selection_points)
+        sel_y1 = min(point[1] for point in selection_points)
+        sel_x2 = max(point[0] for point in selection_points)
+        sel_y2 = max(point[1] for point in selection_points)
         
         for bbox in self._current_image.annotations:
             cx, cy = bbox.center()
@@ -1095,8 +1139,7 @@ class AnnotationCanvas(tk.Canvas):
             if not bbox.is_selected:
                 continue
 
-            cx1, cy1 = self.image_to_canvas(bbox.x1, bbox.y1)
-            cx2, cy2 = self.image_to_canvas(bbox.x2, bbox.y2)
+            cx1, cy1, cx2, cy2 = self._bbox_canvas_bounds(bbox)
             center_x = (cx1 + cx2) / 2
             center_y = (cy1 + cy2) / 2
             center_dist_sq = (canvas_x - center_x) ** 2 + (canvas_y - center_y) ** 2
@@ -1116,6 +1159,8 @@ class AnnotationCanvas(tk.Canvas):
                     continue
                 if handle_dist_sq < best_dist_sq:
                     best_dist_sq = handle_dist_sq
-                    best = (handle_name, bbox)
+                    source_handle = (ROTATED_HANDLE_MAP[handle_name]
+                                     if self._rotation_180 else handle_name)
+                    best = (source_handle, bbox)
 
         return best
