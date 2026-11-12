@@ -4,11 +4,21 @@ import sys
 import os
 import ctypes
 import argparse
+import importlib.util
 from pathlib import Path
 
 # ==================== 启动参数设置区 ====================
 _SINGLE_INSTANCE_MUTEX_NAME = r'Local\AnnotationTool.SingleInstance.6F7D94A1'
 _ERROR_ALREADY_EXISTS = 183
+_STARTUP_DEPENDENCIES = (
+    ('PySide6-Essentials', 'PySide6'),
+    ('Pillow', 'PIL'),
+    ('opencv-python', 'cv2'),
+    ('imageio-ffmpeg', 'imageio_ffmpeg'),
+    ('PyYAML', 'yaml'),
+    ('onnxruntime', 'onnxruntime'),
+    ('ultralytics', 'ultralytics'),
+)
 
 # Suppress libpng iCCP warnings from PNGs with bad embedded profiles (harmless).
 class _StderrFilter:
@@ -64,6 +74,43 @@ def _release_single_instance(handle):
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+def _find_missing_dependencies():
+    """Return required packages that are not importable in the current Python."""
+    missing = []
+    for package_name, module_name in _STARTUP_DEPENDENCIES:
+        try:
+            available = importlib.util.find_spec(module_name) is not None
+        except (ImportError, ValueError):
+            available = False
+        if not available:
+            missing.append(package_name)
+    return missing
+
+
+def _show_missing_dependencies_message(missing):
+    message = (
+        f"缺少依赖：{'、'.join(missing)}\n\n"
+        '请在项目目录运行：\n'
+        'python -m pip install -r requirements.txt'
+    )
+    if sys.platform == 'win32':
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.MessageBoxW.argtypes = [
+            wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT,
+        ]
+        user32.MessageBoxW.restype = ctypes.c_int
+        user32.MessageBoxW(
+            None,
+            message,
+            '运行环境不完整',
+            0x00000000 | 0x00000010 | 0x00010000 | 0x00040000,
+        )
+    else:
+        print(message, file=sys.stderr)
+
+
 def _show_already_running_message():
     """Show a native prompt before any second Tk window is created."""
     from ctypes import wintypes
@@ -88,6 +135,11 @@ def _show_already_running_message():
 
 
 def main():
+    missing_dependencies = _find_missing_dependencies()
+    if missing_dependencies:
+        _show_missing_dependencies_message(missing_dependencies)
+        return
+
     mutex_handle, already_running = _acquire_single_instance()
     if already_running:
         _release_single_instance(mutex_handle)
