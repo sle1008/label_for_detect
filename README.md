@@ -17,18 +17,74 @@
 
 ## 环境要求
 
-- Windows 10/11（推荐）
-- Python 3.10+
-- 预标注可选：NVIDIA GPU + CUDA（`.pt`）；或使用 `.onnx` 模型
+- Windows 10/11，使用 64 位 Python。
+- Python 3.10+；当前维护环境使用 Python 3.13。建议为本项目创建独立的虚拟环境。
+- CPU 即可进行图片标注、视频播放和导出，也可运行 `.pt` / `.onnx` 模型预标注；NVIDIA GPU 与 CUDA 用于可选的推理加速。
+- 如需切换旧版界面或运行 Tk 相关测试，Python 安装时需保留 Tcl/Tk 和 `tkinter` 组件；它们不通过 `pip` 安装。
+
+## 环境依赖
+
+运行依赖统一由 [requirements.txt](requirements.txt) 管理，安装时以该文件为准：
+
+| 依赖包 | 版本要求 | 用途 |
+|--------|----------|------|
+| `ultralytics` | `>=8.0.0` | YOLO 模型加载，图片、批量图片及视频逐帧推理 |
+| `Pillow` | `>=10.0.0` | 图片读取、显示和导出时绘制标注文字 |
+| `opencv-python` | `>=4.8.0` | 视频解码、帧读取及图像格式转换，导入名为 `cv2` |
+| `imageio-ffmpeg` | `>=0.6.0` | 为带框视频导出提供 FFmpeg 编码器和音轨处理 |
+| `PySide6-Essentials` | `>=6.8,<7` | 现代 Qt 界面的 Core / Gui / Widgets，导入名为 `PySide6` |
+| `PyYAML` | `>=6.0` | 读取 YAML 标签集，导入名为 `yaml` |
+| `onnxruntime` | `>=1.16.0` | ONNX 模型推理，默认安装 CPU 版本 |
+
+`NumPy`、`torch`、`torchvision` 等传递依赖会随 OpenCV / Ultralytics 一起由 `pip` 解析并安装；无需为普通 CPU 使用额外安装 CUDA。使用 YOLO26 等较新模型时，Ultralytics 版本还需支持对应的权重格式。
+
+可选环境按实际用途配置：
+
+| 用途 | 额外要求 |
+|------|----------|
+| `.pt` 模型使用 NVIDIA GPU | 安装显卡驱动，并按 [PyTorch 官方安装页面](https://pytorch.org/get-started/locally/) 选择与环境匹配的 CUDA 版 PyTorch / torchvision |
+| `.onnx` 模型使用 NVIDIA GPU | 按 ONNX Runtime 的 [CUDA 安装说明](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html) 配置 `onnxruntime-gpu` 及匹配的 CUDA / cuDNN；CPU 与 GPU 版 Runtime 不应同时安装 |
+| `.engine` / `.trt` 模型 | NVIDIA GPU、相匹配的 CUDA / TensorRT 环境及 TensorRT Python 包；TensorRT 不属于默认安装依赖 |
+| 打包 Windows EXE | `PyInstaller`；`build_exe.bat` 会自动安装该打包依赖，日常运行无需单独安装 |
+
+视频导出所用的 FFmpeg 可执行程序由 `imageio-ffmpeg` 提供，无需另外安装系统 FFmpeg 或配置其 PATH。
 
 ## 安装与运行
 
-```bash
-pip install -r requirements.txt
+在 PowerShell 中进入项目目录，创建独立环境后安装并启动：
+
+```powershell
+git clone https://github.com/sle1008/label_for_detect.git
+cd label_for_detect
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+
+如果已经下载项目，直接在现有项目目录从创建虚拟环境这一步开始。上述命令直接使用虚拟环境中的 Python，无需先运行激活脚本。
+
+如已激活 Conda / venv 环境，也可在同一个终端中运行：
+
+```powershell
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-Windows 下也可双击 `start.bat` 或 `start.vbs`（无控制台窗口启动）。
+Windows 下也可双击 `start.bat` 或 `start.vbs` 无控制台启动；启动脚本使用 PATH 中的 Python，该解释器也需要安装上述依赖。使用项目内 `.venv` 时，推荐直接运行 `.\.venv\Scripts\python.exe main.py`，确保安装和启动使用同一环境。
+
+### 环境检查与缺包提示
+
+启动时会检查上述 7 项运行依赖；缺失时弹出“运行环境不完整”提示并列出缺少的包。请用实际启动软件的 Python 安装依赖，例如：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
+```
+
+`python -m pip check` 用于检查已安装包之间的依赖是否匹配。使用虚拟环境之外的解释器启动时，也应以该解释器执行安装和检查命令。若提示找不到 `tkinter`，需通过 Python 安装程序补装 Tcl/Tk 组件。
+
+### 界面与使用方式
 
 新版布局分为左侧资源与筛选、中间标注画布、右侧推理引擎 / 标签类别 / 标注实例。拖动分隔线可调整面板宽度；底部“活动日志”可查看操作记录。文件选择、类别备注、统计、快捷键说明和导出窗口均使用 Qt 控件。
 
