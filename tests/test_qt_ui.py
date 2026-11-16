@@ -15,7 +15,7 @@ from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyledItemDelegate, QStyle
 
 # ==================== Qt 回归参数设置区 ====================
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -340,7 +340,7 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(image.pixelColor(center.x() + 5, center.y()), QColor('#000000'))
         self.assertEqual(image.pixelColor(center.x() + 5, center.y() - 1), QColor('#ffffff'))
         self.assertEqual(image.pixelColor(center.x() + 5, center.y() - 2).alpha(), 0)
-        # 缩放图片不会改变光标位图；框体和手柄仍保留移动操作提示。
+        # 缩放图片不会改变光标位图；框体内部保留移动操作提示。
         item = self.app._project.current_image
         item.annotations = [BBox(20, 20, 80, 80, 0, 'deer', is_selected=True)]
         move_pointer(self.canvas_point(50, 50))
@@ -350,6 +350,54 @@ class QtWorkbenchTests(unittest.TestCase):
         self.open_video()
         move_pointer(QPoint(canvas.width() // 2, canvas.height() // 2))
         self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
+
+    def test_resize_handle_hover_shows_direction_at_different_scales_and_rotation(self):
+        self.load_images()
+        canvas = self.app._canvas
+        item = self.app._project.current_image
+        box = BBox(60, 50, 240, 150, 0, 'deer', is_selected=True)
+        item.annotations = [box]
+        directions = (
+            (60, 50, Qt.CursorShape.SizeFDiagCursor),
+            (150, 50, Qt.CursorShape.SizeVerCursor),
+            (240, 50, Qt.CursorShape.SizeBDiagCursor),
+            (60, 100, Qt.CursorShape.SizeHorCursor),
+            (240, 100, Qt.CursorShape.SizeHorCursor),
+            (60, 150, Qt.CursorShape.SizeBDiagCursor),
+            (150, 150, Qt.CursorShape.SizeVerCursor),
+            (240, 150, Qt.CursorShape.SizeFDiagCursor),
+        )
+
+        def move_pointer(point):
+            event = QMouseEvent(QEvent.Type.MouseMove, point, QPointF(canvas.mapToGlobal(point.toPoint())),
+                                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(canvas, event)
+
+        for rotated in (False, True):
+            canvas._rotation_180 = rotated
+            for scale in (0.5, 1.0, 2.0):
+                canvas._scale = scale
+                canvas._offset_x = canvas._offset_y = 32
+                for x, y, expected in directions:
+                    with self.subTest(rotated=rotated, scale=scale, handle=(x, y)):
+                        point = QPointF(*canvas.image_to_canvas(x, y))
+                        # 手柄中心及可见小方块外的命中范围，都应给出一致的缩放提示。
+                        for offset in (QPointF(), QPointF(6, 0)):
+                            move_pointer(point + offset)
+                            self.assertEqual(canvas.cursor().shape(), expected)
+                move_pointer(QPointF(*canvas.image_to_canvas(150, 100)))
+                self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.SizeAllCursor)
+                move_pointer(QPointF(*canvas.image_to_canvas(150, 50 - 12 / scale)))
+                self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.BitmapCursor)
+        # 图片边缘的手柄命中范围可延伸至留白，提示必须与实际可拖拽区域一致。
+        canvas._rotation_180 = False
+        box.x1 = 0
+        move_pointer(QPointF(*canvas.image_to_canvas(0, 100)) - QPointF(6, 0))
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.SizeHorCursor)
+        box.is_selected = False
+        move_pointer(QPointF(*canvas.image_to_canvas(0, 100)) - QPointF(6, 0))
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
+        self.assertFalse(item.is_dirty)
 
     def test_selected_box_black_white_outline_and_foreground_layer(self):
         self.load_images()
@@ -623,6 +671,47 @@ class QtWorkbenchTests(unittest.TestCase):
             selection.select(panel.model.index(row), QItemSelectionModel.SelectionFlag.Select)
         panel.set_current_by_full_index(1)
         self.assertEqual(len(selection.selectedIndexes()), 2)
+
+    def test_shortcut_navigation_repaints_previous_highlight_after_annotation(self):
+        for name in ('03.jpg', '04.jpg'):
+            Image.new('RGB', (320, 200)).save(self.images / name)
+        # 隐藏原生窗口但保留 Qt 绘制流程，无需移动用户鼠标或占用桌面。
+        self.app.hide()
+        self.app.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+        self.app.move(0, 0)
+        self.app.show()
+        self.load_images()
+        panel = self.app._thumb_panel
+        painted_selection = {}
+
+        class RecordingDelegate(QStyledItemDelegate):
+            def paint(self, painter, option, index):
+                painted_selection[index.row()] = bool(option.state & QStyle.StateFlag.State_Selected)
+                super().paint(painter, option, index)
+
+        delegate = RecordingDelegate(panel.view)
+        panel.view.setItemDelegate(delegate)
+        for theme in ('light', 'dark'):
+            self.app._set_theme(theme)
+            self.runtime.processEvents()
+            panel.view.viewport().repaint()
+            self.assertEqual({row for row, selected in painted_selection.items() if selected}, {0})
+            for key, target in ((Qt.Key.Key_D, 1), (Qt.Key.Key_Right, 2),
+                                (Qt.Key.Key_A, 1), (Qt.Key.Key_Left, 0)):
+                with self.subTest(theme=theme, key=key, target=target):
+                    item = self.app._project.current_image
+                    item.annotations = [BBox(10, 10, 50, 50, 0, 'deer')]
+                    item.mark_dirty()
+                    with patch.object(self.app, '_on_thumb_selected', wraps=self.app._on_thumb_selected) as navigate:
+                        QTest.keyClick(self.app._canvas, key)
+                        self.wait(lambda: self.app._canvas._current_image is self.app._project.image_list[target])
+                        QTest.qWait(30)
+                        navigate.assert_not_called()
+                    self.assertTrue(preferred_annotation_txt_path(item.path).exists())
+                    self.assertFalse(item.is_dirty)
+                    self.assertEqual({i.row() for i in panel.view.selectionModel().selectedIndexes()}, {target})
+                    # 记录自然重绘后的像素绘制状态；主动抓图会重绘整表，从而掩盖残留高亮。
+                    self.assertEqual({row for row, selected in painted_selection.items() if selected}, {target})
 
     def test_real_ctrl_click_toggles_rows_and_shift_selects_range(self):
         for name in ('03.jpg', '04.jpg'):

@@ -19,10 +19,18 @@ CROSS_CURSOR_SIZE = 32
 CROSS_CURSOR_ARM = 9
 CROSS_CURSOR_OUTLINE_WIDTH = 3
 CROSS_CURSOR_CORE_WIDTH = 1
+# 选中框的黑色外描边与白色内线宽度按逻辑像素统一配置。
 SELECTED_BOX_OUTLINE_WIDTH = 5
-SELECTED_BOX_CORE_WIDTH = 3
+SELECTED_BOX_CORE_WIDTH = 2
 ROTATED_HANDLES = {'nw': 'se', 'ne': 'sw', 'sw': 'ne', 'se': 'nw',
                    'n': 's', 's': 'n', 'w': 'e', 'e': 'w'}
+# 相对的手柄共用一个缩放轴，旋转 180 度后仍使用相同的双向箭头。
+RESIZE_CURSORS = {
+    'nw': Qt.CursorShape.SizeFDiagCursor, 'se': Qt.CursorShape.SizeFDiagCursor,
+    'ne': Qt.CursorShape.SizeBDiagCursor, 'sw': Qt.CursorShape.SizeBDiagCursor,
+    'n': Qt.CursorShape.SizeVerCursor, 's': Qt.CursorShape.SizeVerCursor,
+    'w': Qt.CursorShape.SizeHorCursor, 'e': Qt.CursorShape.SizeHorCursor,
+}
 
 
 class AnnotationCanvas(VisibilityMixin, QWidget):
@@ -287,12 +295,17 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             painter.drawLine(QPointF(0, self._pointer.y()), QPointF(self.width(), self._pointer.y()))
 
     def _update_pointer_cursor(self):
-        if (self._video_mode or not self._current_image or self._pointer is None
-                or not self._frame_rect().contains(self._pointer)):
+        if self._video_mode or not self._current_image or self._pointer is None:
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
-        handle, box = self._find_handle(self._pointer)
-        self.setCursor(Qt.CursorShape.SizeAllCursor if box or self._hover else self._crosshair_cursor)
+        # 光标与按下时共用手柄命中范围，包含图片边缘外可拖拽的少量留白。
+        handle, _ = self._find_handle(self._pointer)
+        if handle:
+            self.setCursor(RESIZE_CURSORS[handle])
+        elif not self._frame_rect().contains(self._pointer):
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeAllCursor if self._hover else self._crosshair_cursor)
 
     def mousePressEvent(self, event):
         self.setFocus()

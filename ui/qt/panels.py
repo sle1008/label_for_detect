@@ -124,6 +124,7 @@ class ThumbnailPanel(QFrame):
         self.app = app
         self.setObjectName('panel')
         self.items, self.indices = [], []
+        self._syncing_current = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 16, 12, 12)
         self.count = QLabel('0 张')
@@ -171,6 +172,8 @@ class ThumbnailPanel(QFrame):
             self.app._on_thumb_selected(self.indices[index.row()])
 
     def queue_image_selection(self, current, previous):
+        if self._syncing_current:
+            return
         # Qt 完成 Ctrl/Shift 的选择处理后再导航，防止预览回调覆盖本次多选。
         index = QPersistentModelIndex(current)
         def select():
@@ -204,12 +207,15 @@ class ThumbnailPanel(QFrame):
         if index in self.indices:
             model_index = self.model.index(self.indices.index(index))
             selection = self.view.selectionModel()
-            selection.blockSignals(True)
-            if selection.isSelected(model_index) or selection.currentIndex() == model_index:
-                selection.setCurrentIndex(model_index, QItemSelectionModel.SelectionFlag.NoUpdate)
-            else:
-                self.view.setCurrentIndex(model_index)
-            selection.blockSignals(False)
+            # 同步当前位置时只跳过业务导航，保留 Qt 选择信号以重绘旧、新高亮行。
+            self._syncing_current = True
+            try:
+                if selection.isSelected(model_index) or selection.currentIndex() == model_index:
+                    selection.setCurrentIndex(model_index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                else:
+                    self.view.setCurrentIndex(model_index)
+            finally:
+                self._syncing_current = False
             self.view.scrollTo(model_index)
 
     def remove_item(self, item):
