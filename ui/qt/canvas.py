@@ -268,6 +268,9 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
                                                    2 * HANDLE_RADIUS, 2 * HANDLE_RADIUS), 1, 1)
             if self._video_mode or self._label_mode == LABEL_MODE_FULL or selected or self._hover is box:
                 text = f'{box.class_name}'
+                if not self._video_mode:
+                    # 图片框使用原始实例顺序编号，与右侧实例表及精简标签一致。
+                    text = f'#{index + 1} {text}'
                 if self._video_mode or box.confidence < 1:
                     text += f' {box.confidence:.2f}'
             elif self._label_mode == LABEL_MODE_COMPACT:

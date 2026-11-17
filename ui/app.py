@@ -3582,19 +3582,28 @@ class AnnotationApp(tk.Tk):
         if not selected:
             return
         
-        # Create undo command
-        indices = []
-        for ann in selected:
-            idx = item.annotations.index(ann)
-            indices.append((idx, ann.copy()))
+        # 保留原对象与顺序，让撤销可恢复选择，也保持其他编辑命令的对象引用有效。
+        indices = [(idx, ann) for idx, ann in enumerate(item.annotations) if ann.is_selected]
+        removed_ids = {ann.id for _, ann in indices}
+        remaining = [ann for ann in item.annotations if ann.id not in removed_ids]
+        # 批量删除后从最后一个被删框向后选择；没有后续框时回退到剩余末尾框。
+        following = item.annotations[indices[-1][0] + 1:]
+        replacement = following[0] if following else remaining[-1] if remaining else None
         
         def execute():
-            item.remove_selected()
+            # 删除目标固定在命令创建时；重做不依赖用户后来改变的选择。
+            item.annotations = [ann for ann in item.annotations if ann.id not in removed_ids]
+            item.deselect_all()
+            if replacement is not None:
+                replacement.is_selected = True
+            item.mark_dirty()
             self._canvas.refresh()
             self._on_annotation_changed()
         
         def undo():
-            for idx, ann in sorted(indices):
+            item.deselect_all()
+            for idx, ann in indices:
+                ann.is_selected = True
                 item.annotations.insert(idx, ann)
             item.mark_dirty()
             self._canvas.refresh()

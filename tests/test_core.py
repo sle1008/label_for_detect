@@ -1780,6 +1780,56 @@ class LabelNoteTests(unittest.TestCase):
             self.assertEqual(manager.get_name(0), 'bear')
 
 
+class AnnotationDeletionTests(unittest.TestCase):
+    def test_delete_neighbor_selection_and_history_in_both_interfaces(self):
+        from core.undo_redo import UndoRedoManager
+        from ui.app import AnnotationApp
+        from ui.qt.controller import ApplicationController
+
+        cases = (((), None), ((0,), 1), ((1,), 2), ((3,), 2),
+                 ((0, 1), 2), ((1, 2), 3), ((1, 3), 2), ((2, 3), 1),
+                 ((0, 1, 2, 3), None))
+        for controller in (AnnotationApp, ApplicationController):
+            for selected_rows, replacement_row in cases:
+                with self.subTest(interface=controller.__name__, selected=selected_rows):
+                    boxes = [BBox(10 * row, 0, 10 * row + 5, 10, 0, 'animal',
+                                  is_selected=row in selected_rows) for row in range(4)]
+                    item = ImageItem(path=Path('sample.jpg'), annotations=list(boxes))
+                    manager = UndoRedoManager()
+                    app = SimpleNamespace(
+                        _video_path='', _project=SimpleNamespace(current_image=item),
+                        _canvas=SimpleNamespace(refresh=lambda: None),
+                        _on_annotation_changed=lambda: None,
+                        _mark_real_annotation_change=lambda current: current.mark_dirty(),
+                        _current_image_undo_manager=lambda: manager,
+                    )
+                    controller._delete_selected(app)
+                    if not selected_rows:
+                        self.assertEqual(item.annotations, boxes)
+                        self.assertFalse(item.is_dirty)
+                        self.assertFalse(manager.can_undo())
+                        continue
+                    expected = [box for row, box in enumerate(boxes) if row not in selected_rows]
+                    selected = [boxes[replacement_row]] if replacement_row is not None else []
+                    self.assertEqual(item.annotations, expected)
+                    self.assertEqual(item.get_selected_annotations(), selected)
+                    self.assertTrue(item.is_dirty)
+                    self.assertIsNotNone(manager.undo())
+                    self.assertEqual(item.annotations, boxes)
+                    self.assertTrue(all(actual is original for actual, original in zip(item.annotations, boxes)))
+                    self.assertEqual(item.get_selected_annotations(), [boxes[row] for row in selected_rows])
+                    # 选择变化不属于删除命令的目标，连续撤销/重做均保持原删除集合。
+                    item.deselect_all()
+                    boxes[-1].is_selected = True
+                    self.assertIsNotNone(manager.redo())
+                    self.assertEqual(item.annotations, expected)
+                    self.assertEqual(item.get_selected_annotations(), selected)
+                    self.assertIsNotNone(manager.undo())
+                    self.assertIsNotNone(manager.redo())
+                    self.assertEqual(item.annotations, expected)
+                    self.assertEqual(item.get_selected_annotations(), selected)
+
+
 class ImageItemMutationTests(unittest.TestCase):
     def test_remove_selected_marks_dirty(self):
         item = ImageItem(path=Path('sample.jpg'))

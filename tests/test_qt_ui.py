@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
-from PySide6.QtGui import QColor, QMouseEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyledItemDelegate, QStyle
 
@@ -288,6 +288,49 @@ class QtWorkbenchTests(unittest.TestCase):
         buttons['前框 (Q)'].click()
         self.assertEqual(item.get_selected_annotations(), [item.annotations[0]])
 
+    def test_delete_box_selects_neighbor_and_restores_selection_on_undo_redo(self):
+        self.load_images()
+        item = self.app._project.current_image
+        boxes = [BBox(10 + row * 60, 30, 50 + row * 60, 100, row % 2,
+                      'deer' if row % 2 == 0 else 'person') for row in range(4)]
+        item.annotations = list(boxes)
+        boxes[1].is_selected = True
+        self.app._on_annotation_changed()
+
+        def assert_selected(box):
+            self.assertEqual(item.get_selected_annotations(), [box] if box else [])
+            table = self.app._box_list_panel.table
+            self.assertEqual(table.rowCount(), len(item.annotations))
+            self.assertEqual({index.row() for index in table.selectedIndexes()},
+                             {item.annotations.index(box)} if box else set())
+            if box:
+                panel = self.app._label_panel
+                self.assertEqual(panel._visible_labels[panel.list.currentRow()].class_id, box.class_id)
+
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_Delete)
+        self.assertEqual(item.annotations, [boxes[0], boxes[2], boxes[3]])
+        assert_selected(boxes[2])
+        self.assertTrue(item.is_dirty)
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(item.annotations, boxes)
+        assert_selected(boxes[1])
+        # 撤销后即使用户改变选择，重做也只能删除原命令中的框。
+        item.deselect_all()
+        boxes[3].is_selected = True
+        self.app._on_annotation_changed()
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(item.annotations, [boxes[0], boxes[2], boxes[3]])
+        assert_selected(boxes[2])
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_Delete)
+        assert_selected(boxes[3])
+        # 删除末尾后选择前一个框；删空后不留下失效选择。
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_Delete)
+        assert_selected(boxes[0])
+        QTest.keyClick(self.app._canvas, Qt.Key.Key_Delete)
+        assert_selected(None)
+        self.app._save_current_annotations()
+        self.assertEqual(preferred_annotation_txt_path(item.path).read_text(encoding='utf-8'), '')
+
     def test_open_directory_shortcut_matches_menu_and_refresh_keeps_directory(self):
         with patch.object(self.app, '_open_directory') as open_directory:
             self.app._setup_shortcuts()
@@ -420,6 +463,39 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertIs(item.annotations[0], selected)
         self.assertIs(item.annotations[1], other)
         self.assertEqual((selected.x1, selected.y1, selected.x2, selected.y2), (30, 30, 150, 130))
+
+    def test_full_box_labels_match_instance_numbers_and_keep_compact_display(self):
+        from ui.canvas_state import LABEL_MODE_FULL, LABEL_MODE_COMPACT, LABEL_MODE_HIDDEN
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(30, 30, 90, 100, 1, 'person', is_selected=True),
+                            BBox(150, 30, 250, 100, 0, 'deer', .81)]
+        self.app._box_list_panel.refresh()
+        canvas = self.app._canvas
+        canvas._hover = None
+        drawn = []
+
+        class RecordingPainter(QPainter):
+            def drawText(self, *args):
+                drawn.append(args[-1])
+                return super().drawText(*args)
+
+        def labels(mode):
+            canvas.set_label_mode(mode)
+            drawn.clear()
+            with patch('ui.qt.canvas.QPainter', RecordingPainter):
+                canvas.grab()
+            return list(drawn)
+
+        # 编号与实例表的行号一致，类别 ID 和选中框置顶绘制都不改变编号。
+        self.assertEqual(self.app._box_list_panel.table.item(0, 0).text(), '1')
+        self.assertEqual(labels(LABEL_MODE_FULL), ['#2 deer 0.81', '#1 person'])
+        item.deselect_all()
+        self.assertEqual(labels(LABEL_MODE_COMPACT), ['#1', '#2'])
+        self.assertEqual(labels(LABEL_MODE_HIDDEN), [])
+        self.assertEqual(labels(LABEL_MODE_FULL), ['#1 person', '#2 deer 0.81'])
+        canvas.show_video_frame(item._pil_image, item.annotations)
+        self.assertEqual(labels(LABEL_MODE_FULL), ['person 1.00', 'deer 0.81'])
 
     def test_filtering_and_background_status_preserve_original_mapping(self):
         self.load_images()
