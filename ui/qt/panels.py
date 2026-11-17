@@ -129,6 +129,8 @@ class ThumbnailPanel(QFrame):
         layout.setContentsMargins(12, 16, 12, 12)
         self.count = QLabel('0 张')
         self.count.setObjectName('muted')
+        self.count.setMinimumWidth(0)
+        self.count.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         title = section('媒体资源', 'LIBRARY')
         self.refresh_button = QToolButton()
         self.refresh_button.setObjectName('compact')
@@ -197,7 +199,14 @@ class ThumbnailPanel(QFrame):
         self.items = list(items)
         self.indices = list(full_indices) if full_indices is not None else list(range(len(items)))
         self.model.endResetModel()
-        self.count.setText(f'{filter_hint + " · " if filter_hint else ""}{len(items):,} 张图片')
+        self.set_count_text(f'{filter_hint + " · " if filter_hint else ""}{len(items):,} 张图片')
+
+    def set_count_text(self, text):
+        """数量摘要只显示打开目录的末级名称，完整目录保留在悬停提示中。"""
+        directory = self.app._project.image_dir
+        name = (directory.name or directory.anchor) if directory else ''
+        self.count.setText(f'{text} · {name}' if name else text)
+        self.count.setToolTip(f'{text}\n{directory}' if directory else text)
 
     def full_indices(self):
         return list(self.indices)
@@ -228,7 +237,7 @@ class ThumbnailPanel(QFrame):
         self.indices.pop(row)
         self.indices = [i - 1 if i > full else i for i in self.indices]
         self.model.endRemoveRows()
-        self.count.setText(f'{len(self.items):,} 张图片')
+        self.set_count_text(f'{len(self.items):,} 张图片')
         return True
 
     def clear(self):

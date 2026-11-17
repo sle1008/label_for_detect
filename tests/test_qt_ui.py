@@ -115,6 +115,30 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(self.app._project.current_index, 0)
         self.assertEqual(self.app._label_panel.list.count(), 2)
 
+    def test_resource_filter_heights_and_directory_summary_follow_opened_directory(self):
+        self.load_images()
+        previous = next(button for button in self.app.findChildren(QPushButton)
+                        if button.text() == '‹ 上一张')
+        for theme in ('dark', 'light'):
+            self.app._set_theme(theme)
+            self.runtime.processEvents()
+            self.assertEqual(self.app._status_filter_combo.height(), previous.height())
+            self.assertEqual(self.app.class_filter.height(), previous.height())
+            self.assertEqual(self.app._thumb_panel.count.text(), '2 张图片 · images')
+        self.app._apply_image_filter(ImageFilter.UNANNOTATED)
+        self.assertTrue(self.app._thumb_panel.count.text().endswith(' · images'))
+        opened = self.root / 'parent' / '目标 images'
+        opened.mkdir(parents=True)
+        Image.new('RGB', (32, 24)).save(opened / 'one.jpg')
+        (opened / 'classes.txt').write_text('0: animal\n', encoding='utf-8')
+        self.app._reset_image_filters()
+        self.app._load_directory(str(opened))
+        self.wait(lambda: not self.app._directory_loading
+                  and self.app._canvas._current_image is not None)
+        self.assertEqual(self.app._thumb_panel.count.text(), '1 张图片 · 目标 images')
+        self.assertNotIn(str(opened.parent), self.app._thumb_panel.count.text())
+        self.assertIn(str(opened), self.app._thumb_panel.count.toolTip())
+
     def test_directory_preview_does_not_block_ui_and_prepares_model_in_background(self):
         from PySide6.QtCore import QTimer
         for index in range(DIRECTORY_PREVIEW_COUNT + 3):
@@ -141,6 +165,7 @@ class QtWorkbenchTests(unittest.TestCase):
                 self.wait(lambda: self.app._thumb_panel.model.rowCount() == DIRECTORY_PREVIEW_COUNT)
                 self.assertTrue(self.app._directory_loading)
                 self.assertFalse(self.app._thumb_panel.view.isEnabled())
+                self.assertTrue(self.app._thumb_panel.count.text().endswith(' · images'))
                 # 后台暂停扫描时，定时器与主题操作仍可处理，预览不会导航到错误序号。
                 ticks = []
                 timer = QTimer(self.app)
@@ -153,6 +178,7 @@ class QtWorkbenchTests(unittest.TestCase):
             finally:
                 release.set()
             self.wait(lambda: not self.app._directory_loading and self.app._canvas._current_image is not None)
+        self.assertTrue(self.app._thumb_panel.count.text().endswith(' · images'))
         self.assertEqual(self.app._thumb_panel.model.rowCount(), DIRECTORY_PREVIEW_COUNT + 5)
         self.assertTrue(self.app._thumb_panel.view.isEnabled())
         self.assertTrue(index_threads)
@@ -1151,6 +1177,7 @@ class QtWorkbenchTests(unittest.TestCase):
         self.wait(lambda: self.app._thumb_panel.model.rowCount() == 2 and self.app._canvas._current_image.path.name == '02.jpg')
         self.assertFalse(self.paths[0].exists())
         self.assertEqual(self.app._thumb_panel.full_indices(), [0, 1])
+        self.assertEqual(self.app._thumb_panel.count.text(), '2 张图片 · images')
         (self.images / '03.jpg').unlink()
         Image.new('RGB', (320, 200)).save(self.images / '04.jpg')
         QTest.mouseClick(self.app._thumb_panel.refresh_button, Qt.MouseButton.LeftButton)
@@ -1161,9 +1188,11 @@ class QtWorkbenchTests(unittest.TestCase):
         QTest.keyClick(self.app._canvas, Qt.Key.Key_F5)
         self.wait(lambda: not self.app._directory_loading)
         self.assertEqual(self.app._thumb_panel.model.rowCount(), 1)
+        self.assertEqual(self.app._thumb_panel.count.text(), '1 张图片 · images')
         with patch('ui.qt.controller.askyesno', return_value=True):
             self.app._delete_image(0)
         self.assertEqual(self.app._thumb_panel.model.rowCount(), 0)
+        self.assertEqual(self.app._thumb_panel.count.text(), '0 张图片 · images')
         self.assertIsNone(self.app._canvas._current_image)
 
     def test_batch_prediction_uses_current_filter_and_saves_each_result(self):

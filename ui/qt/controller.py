@@ -1409,7 +1409,7 @@ class ApplicationController:
         if scan_gen != self._scan_generation or not self._directory_loading or self._closing:
             return
         self._thumb_panel.set_images([ImageItem(path=path) for path in paths])
-        self._thumb_panel.count.setText(f'已发现 {len(paths)} 张图片 · 后台扫描中…')
+        self._thumb_panel.set_count_text(f'已发现 {len(paths)} 张图片 · 后台扫描中…')
         self._status_bar.info(f'已显示首批 {len(paths)} 张图片，正在后台加载完整目录…')
 
     def _resolve_preload_path(self, dir_path: str, paths: list):

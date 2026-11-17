@@ -248,6 +248,10 @@ class AnnotationApp(QMainWindow, ApplicationController):
             button.clicked.connect(callback)
             navigation.addWidget(button)
         left_layout.addLayout(navigation)
+        # 筛选和图片导航采用相同行高，减少左侧面板的纵向占用。
+        navigation_height = navigation.itemAt(0).widget().sizeHint().height()
+        self._status_filter_combo.setFixedHeight(navigation_height)
+        self.class_filter.setFixedHeight(navigation_height)
         self._workspace_paned.addWidget(left)
         center = QWidget()
         center_layout = QVBoxLayout(center)
