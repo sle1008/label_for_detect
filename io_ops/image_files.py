@@ -5,6 +5,10 @@ from typing import Tuple
 
 from core.image_item import ImageItem
 from io_ops.annotation_status import resolve_annotation_txt_path
+from io_ops.label_set_detector import is_label_set_file
+
+# ==================== 文件关联参数设置区 ====================
+ANNOTATION_EXTENSION = '.txt'
 
 
 def delete_image_and_labels(item: ImageItem) -> Tuple[bool, str]:
@@ -25,11 +29,14 @@ def delete_image_and_labels(item: ImageItem) -> Tuple[bool, str]:
         resolved = resolve_annotation_txt_path(path)
     if resolved:
         txt_paths.add(resolved)
-    sidecar = path.with_suffix('.txt')
+    sidecar = path.with_suffix(ANNOTATION_EXTENSION)
     if sidecar.is_file():
         txt_paths.add(sidecar)
 
     for txt in txt_paths:
+        # 同名 TXT 也可能是整个目录的类别定义，不能随单张图片删除。
+        if is_label_set_file(txt):
+            continue
         try:
             txt.unlink()
         except OSError as e:
@@ -46,10 +53,12 @@ def delete_annotation_files(image_path: Path) -> None:
     resolved = resolve_annotation_txt_path(image_path)
     if resolved:
         txt_paths.add(resolved)
-    sidecar = image_path.with_suffix('.txt')
+    sidecar = image_path.with_suffix(ANNOTATION_EXTENSION)
     if sidecar.is_file():
         txt_paths.add(sidecar)
     for txt in txt_paths:
+        if is_label_set_file(txt):
+            continue
         try:
             txt.unlink()
         except OSError:

@@ -7,8 +7,10 @@ from typing import Callable, Iterable, Optional
 
 from core.image_item import ImageItem
 from io_ops.annotation_status import resolve_annotation_txt_path
+from io_ops.label_set_detector import is_label_set_file
 
 
+# ==================== 图片导出参数设置区 ====================
 EXPORT_MODE_COPY = 'copy'
 EXPORT_MODE_MOVE = 'move'
 VALID_EXPORT_MODES = frozenset({EXPORT_MODE_COPY, EXPORT_MODE_MOVE})
@@ -107,6 +109,9 @@ def _export_one(
             error='目标位置存在同名文件，已跳过',
         )
     source_label = resolve_annotation_txt_path(source_image)
+    # 类别定义属于目录，复制或移动图片时不将其作为逐图标注带走。
+    if source_label is not None and is_label_set_file(source_label):
+        source_label = None
     target_stem = _allocate_stem(source_image.stem, occupied)
     target_image = images_dir / f'{target_stem}{source_image.suffix}'
     target_label = labels_dir / f'{target_stem}.txt' if source_label else None

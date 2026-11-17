@@ -70,6 +70,18 @@ def read_label_set_txt(path: Path, require_indexed: bool = False,
     return definitions if len(definitions) >= min_labels else None
 
 
+def is_label_set_file(path: Path) -> bool:
+    """按自动导入的同一规则判断 TXT，区分类别定义和逐图坐标标注。"""
+    path = Path(path)
+    if path.suffix.lower() != '.txt' or not path.is_file():
+        return False
+    named = LABEL_NAME_KEYWORD in path.stem.casefold()
+    return read_label_set_txt(
+        path, require_indexed=not named,
+        min_labels=1 if named else CONTENT_MIN_LABELS,
+    ) is not None
+
+
 def iter_label_set_candidates(directory: Path) -> Iterator[tuple]:
     """只扫描当前目录，按标准文件名、包含 class 的名称、内容匹配依次查找。"""
     try:

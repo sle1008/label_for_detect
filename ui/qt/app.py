@@ -18,6 +18,7 @@ from ui.qt.panels import (ThumbnailPanel, LabelPanel, BoxListPanel, ThresholdSli
                            VideoControls, StatusBar, FilterButton, section)
 from ui.qt.theme import FONT_FAMILY, FONT_SIZE, icon, apply_theme, set_button_icon
 from ui.qt.dialogs import showerror
+from ui.qt.localization import install_chinese_translations
 from utils.paths import get_icon_path
 from utils.dpi import configure_ui_dpi
 from io_ops.pre_annotator import DEFAULT_INFERENCE_MODE, INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS
@@ -38,6 +39,7 @@ def ensure_application():
     global _application
     configure_ui_dpi('modern')
     _application = QApplication.instance() or QApplication(sys.argv[:1])
+    install_chinese_translations(_application)
     _application.setStyle('Fusion')
     _application.setFont(QFont(FONT_FAMILY, FONT_SIZE))
     return _application

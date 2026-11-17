@@ -18,6 +18,10 @@ FONT_SIZE = 10
 SELECTION_BACKGROUND = '#4b78b4'
 SELECTION_TEXT = '#ffffff'
 CLASS_LIST_FONT_SIZE = 14
+SPLITTER_HOVER_COLOR = '#477df0'
+# 高亮只占分隔条中央的 20%，拖动命中范围仍由各控件的尺寸决定。
+SPLITTER_HOVER_START = 0.4
+SPLITTER_HOVER_END = 0.6
 ASSET_DIRECTORY = Path(__file__).resolve().parent / 'assets'
 THEME_COLORS = {
     'dark': {'background': BACKGROUND, 'surface': SURFACE, 'text': TEXT, 'muted': MUTED,
@@ -87,7 +91,6 @@ QMenu::item:selected { background: #34527f; }
 QMenu::item:disabled { color: #596779; }
 QMenu::separator { height: 1px; background: #354154; margin: 5px; }
 QSplitter::handle { background: transparent; }
-QSplitter::handle:hover { background: #477df0; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
 QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
 QScrollBar::handle { background: #39485e; border-radius: 3px; min-height: 24px; min-width: 24px; }
@@ -107,6 +110,19 @@ QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #52617a; bor
 QCheckBox::indicator:checked { background: #5d91ff; border-color: #82adff; }
 QToolButton#filter { text-align: left; padding: 7px 22px 7px 9px; }
 QToolButton#filter::menu-indicator { subcontrol-origin: padding; subcontrol-position: bottom right; width: 10px; height: 10px; }
+'''
+# 两种分隔方向共用窄高亮，透明边缘仍可响应悬停和拖动。
+_splitter_hover_stops = (
+    f'stop:{SPLITTER_HOVER_START - 0.001:.3f} transparent, '
+    f'stop:{SPLITTER_HOVER_START:.3f} {SPLITTER_HOVER_COLOR}, '
+    f'stop:{SPLITTER_HOVER_END:.3f} {SPLITTER_HOVER_COLOR}, '
+    f'stop:{SPLITTER_HOVER_END + 0.001:.3f} transparent'
+)
+STYLESHEET += f'''
+QSplitter::handle:horizontal:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {_splitter_hover_stops}); }}
+QSplitter::handle:vertical:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, {_splitter_hover_stops}); }}
 '''
 
 

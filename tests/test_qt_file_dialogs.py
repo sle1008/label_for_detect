@@ -6,13 +6,19 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QPushButton, QToolButton
+from PySide6.QtWidgets import (
+    QApplication, QDialogButtonBox, QFileDialog, QLabel, QLineEdit, QListView, QMessageBox, QPushButton,
+    QStyle, QStyleOptionFrame, QStyleOptionViewItem, QToolButton, QTreeView,
+)
 from ui.qt.app import ensure_application
 from ui.qt.bridge import filedialog
-from ui.qt.file_dialog import ADDRESS_HISTORY_LIMIT, PathFileDialog
+from ui.qt.file_dialog import (
+    ADDRESS_HISTORY_LIMIT, ADDRESS_MAX_WIDTH, FILE_DIALOG_DEFAULT_HEIGHT, FILE_DIALOG_DEFAULT_WIDTH,
+    PathFileDialog,
+)
 from ui.qt.theme import apply_theme, theme_color
 
 # ==================== 文件选择回归参数设置区 ====================
@@ -50,8 +56,8 @@ class QtFileDialogTests(unittest.TestCase):
         PathFileDialog._recent_directories = self.previous_history
         self.temporary.cleanup()
 
-    def make_dialog(self, mode='open'):
-        dialog = PathFileDialog(directory=str(self.initial),
+    def make_dialog(self, mode='open', directory=None):
+        dialog = PathFileDialog(directory=str(directory or self.initial),
                                 name_filter=filedialog._filter(FILE_TYPES))
         self.windows.append(dialog)
         if mode == 'directory':
@@ -71,10 +77,159 @@ class QtFileDialogTests(unittest.TestCase):
     def paste_address(self, dialog, text):
         dialog.focus_address()
         self.runtime.clipboard().setText(text)
+        self.runtime.processEvents()
         QTest.keyClick(dialog.address_edit, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
         self.assertEqual(dialog.address_edit.text(), text)
         QTest.keyClick(dialog.address_edit, Qt.Key.Key_Return)
         self.runtime.processEvents()
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + MODEL_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            self.runtime.processEvents()
+            if predicate():
+                return
+            QTest.qWait(5)
+        self.fail('文件选择器模型或编辑状态等待超时')
+
+    def test_address_row_uses_available_space_and_blank_menu_controls_views(self):
+        for theme in ('dark', 'light'):
+            apply_theme(self.runtime, theme)
+            for mode in MODES:
+                with self.subTest(theme=theme, mode=mode):
+                    dialog = self.make_dialog(mode)
+                    label = dialog.findChild(QLabel, 'lookInLabel')
+                    label_right = label.mapTo(dialog, QPoint(label.width(), 0)).x()
+                    address_left = dialog.address_combo.mapTo(dialog, QPoint()).x()
+                    self.assertLessEqual(address_left - label_right, 10)
+                    self.assertGreater(dialog.address_combo.width(), 440)
+                    self.assertGreaterEqual(dialog.width(), FILE_DIALOG_DEFAULT_WIDTH)
+                    self.assertGreaterEqual(dialog.height(), FILE_DIALOG_DEFAULT_HEIGHT)
+                    for name in ('newFolderButton', 'listModeButton', 'detailModeButton'):
+                        self.assertTrue(dialog.findChild(QToolButton, name).isHidden())
+                    view = dialog.findChild(QListView, 'listView')
+                    menu = dialog._file_context_menu(view, QPoint(10, view.viewport().height() - 10))
+                    try:
+                        actions = {action.text(): action for action in menu.actions()}
+                        self.assertIn('列表视图', actions)
+                        self.assertIn('详细视图', actions)
+                        for text, view_mode in (('详细视图', QFileDialog.ViewMode.Detail),
+                                                ('列表视图', QFileDialog.ViewMode.List)):
+                            actions[text].trigger()
+                            self.runtime.processEvents()
+                            self.assertEqual(dialog.viewMode(), view_mode)
+                            self.assertTrue(actions[text].isChecked())
+                    finally:
+                        menu.deleteLater()
+                    dialog.hide()
+
+    def test_context_creation_and_rename_keep_full_editor_text_in_both_views(self):
+        for theme in ('dark', 'light'):
+            apply_theme(self.runtime, theme)
+            for mode, view_type, name in ((QFileDialog.ViewMode.List, QListView, 'listView'),
+                                          (QFileDialog.ViewMode.Detail, QTreeView, 'treeView')):
+                with self.subTest(theme=theme, view=mode):
+                    dialog = self.make_dialog('directory')
+                    dialog.setViewMode(mode)
+                    view = dialog.findChild(view_type, name)
+                    menu = dialog._file_context_menu(view, QPoint(10, view.viewport().height() - 10))
+                    create = next(action for action in menu.actions()
+                                  if action.objectName() == 'qt_new_folder_action')
+                    create.trigger()
+                    self.wait_for(lambda: any(editor.isVisible() for editor in view.findChildren(QLineEdit)))
+                    editor = next(editor for editor in view.findChildren(QLineEdit) if editor.isVisible())
+                    self.assertIn('新建文件夹', editor.text())
+                    option = QStyleOptionFrame()
+                    editor.initStyleOption(option)
+                    content = editor.style().subElementRect(QStyle.SubElement.SE_LineEditContents, option, editor)
+                    self.assertGreaterEqual(content.height(), editor.fontMetrics().height())
+                    created_name = f'新目录_{theme}_{name}'
+                    created = self.initial / created_name
+                    editor.setText(created_name)
+                    QTest.keyClick(editor, Qt.Key.Key_Return)
+                    self.wait_for(created.is_dir)
+                    self.wait_for(lambda: not any(edit.isVisible() for edit in view.findChildren(QLineEdit)))
+                    menu.deleteLater()
+                    self.wait_for(lambda: view.model().index(str(created)).isValid())
+                    index = view.model().index(str(created))
+                    view.scrollTo(index)
+                    view.grab()
+                    # 文件系统模型会异步排序，等待时重新取索引以获取最新行号。
+                    self.wait_for(lambda: view.visualRect(view.model().index(str(created))).isValid())
+                    index = view.model().index(str(created))
+                    point = view.visualRect(index).intersected(view.viewport().rect()).center()
+                    rename_menu = dialog._file_context_menu(view, point)
+                    self.assertEqual(Path(view.model().filePath(view.currentIndex())), created)
+                    rename = next(action for action in rename_menu.actions()
+                                  if action.objectName() == 'qt_rename_action')
+                    rename.trigger()
+                    self.wait_for(lambda: any(edit.isVisible() for edit in view.findChildren(QLineEdit)))
+                    editor = next(edit for edit in view.findChildren(QLineEdit) if edit.isVisible())
+                    renamed = created.with_name(created_name + '_已重命名')
+                    editor.setText(renamed.name)
+                    QTest.keyClick(editor, Qt.Key.Key_Return)
+                    self.wait_for(renamed.is_dir)
+                    self.assertFalse(created.exists())
+                    rename_menu.deleteLater()
+                    dialog.hide()
+
+    def test_file_menus_and_delete_confirmations_are_chinese_and_keep_cancel_behavior(self):
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                apply_theme(self.runtime, theme)
+                folder = self.initial / f'待删除目录_{theme}'
+                folder.mkdir()
+                dialog = self.make_dialog('directory')
+                dialog.setViewMode(QFileDialog.ViewMode.Detail)
+                view = dialog.findChild(QTreeView, 'treeView')
+                self.wait_for(lambda: view.visualRect(view.model().index(str(folder))).isValid())
+                index = view.model().index(str(folder))
+                option = QStyleOptionViewItem()
+                view.itemDelegate().initStyleOption(option, index.siblingAtColumn(2))
+                self.assertEqual(option.text, '文件夹')
+                self.assertIn('文件类型', dialog.findChild(QLabel, 'fileTypeLabel').text())
+                buttons = dialog.findChild(QDialogButtonBox, 'buttonBox')
+                self.assertIn('取消', buttons.button(QDialogButtonBox.StandardButton.Cancel).text())
+                edit_menu = dialog.address_edit.createStandardContextMenu()
+                self.assertTrue(any('粘贴' in action.text() for action in edit_menu.actions()))
+                self.assertFalse(any('Paste' in action.text() for action in edit_menu.actions()))
+                edit_menu.deleteLater()
+                dialog.setOption(QFileDialog.Option.ReadOnly)
+                restricted = dialog._file_context_menu(view, view.visualRect(index).center())
+                for action in restricted.actions():
+                    if action.objectName() in ('qt_rename_action', 'qt_delete_action', 'qt_new_folder_action'):
+                        self.assertFalse(action.isEnabled())
+                restricted.deleteLater()
+                dialog.setOption(QFileDialog.Option.ReadOnly, False)
+                menu = dialog._file_context_menu(view, view.visualRect(index).center())
+                actions = {action.objectName(): action for action in menu.actions()}
+                self.assertIn('重命名', actions['qt_rename_action'].text())
+                self.assertIn('删除', actions['qt_delete_action'].text())
+                self.assertIn('新建', actions['qt_new_folder_action'].text())
+                self.assertIn('隐藏', actions['qt_show_hidden_action'].text())
+                confirmations = []
+
+                def answer_delete(answer):
+                    box = self.runtime.activeModalWidget()
+                    if isinstance(box, QMessageBox):
+                        confirmations.append((box.windowTitle(), box.text(),
+                                              [button.text() for button in box.buttons()]))
+                        box.button(answer).click()
+
+                for answer in (QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes):
+                    QTimer.singleShot(0, lambda response=answer: answer_delete(response))
+                    actions['qt_delete_action'].trigger()
+                    self.runtime.processEvents()
+                    self.assertEqual(folder.exists(), answer == QMessageBox.StandardButton.No)
+                self.assertEqual(len(confirmations), 2)
+                for title, message, captions in confirmations:
+                    self.assertIn('删除', title)
+                    self.assertIn('删除', message)
+                    self.assertFalse('Are you sure' in message)
+                    self.assertTrue(any('是' in caption for caption in captions))
+                    self.assertTrue(any('否' in caption for caption in captions))
+                menu.deleteLater()
+                dialog.hide()
 
     def test_pasted_directory_navigates_without_accepting_in_all_modes(self):
         for mode in MODES:
@@ -195,6 +350,66 @@ class QtFileDialogTests(unittest.TestCase):
         self.assertEqual([Path(reopened.address_combo.itemText(index))
                           for index in range(reopened.address_combo.count())],
                          [self.initial, *expected][:ADDRESS_HISTORY_LIMIT])
+
+    def test_long_address_keeps_dialog_compact_and_full_path_editable(self):
+        long_directory = self.root / ('parent_' + 'a' * 48) / ('nested_' + 'b' * 48) / '尾部目标目录'
+        long_directory.mkdir(parents=True)
+        for theme in ('dark', 'light'):
+            apply_theme(self.runtime, theme)
+            for mode in MODES:
+                with self.subTest(theme=theme, mode=mode):
+                    short = self.make_dialog(mode)
+                    short_width = short.width()
+                    short.hide()
+                    dialog = self.make_dialog(mode, long_directory)
+                    self.assertLessEqual(dialog.width(), short_width)
+                    self.assertLessEqual(dialog.address_combo.width(), ADDRESS_MAX_WIDTH)
+                    self.assertEqual(Path(dialog.address_edit.text()), long_directory)
+                    self.assertEqual(dialog.address_edit.cursorPosition(), len(dialog.address_edit.text()))
+                    dialog.address_edit.grab()
+                    # 输入框左边对应中间字符，说明只滚动隐藏开头，没有截断路径数据。
+                    self.assertGreater(dialog.address_edit.cursorPositionAt(
+                        QPoint(4, dialog.address_edit.height() // 2)), 0)
+                    self.paste_address(dialog, str(self.initial))
+                    self.paste_address(dialog, str(long_directory))
+                    dialog.resize(1200, dialog.height())
+                    self.runtime.processEvents()
+                    self.assertLessEqual(dialog.address_combo.width(), ADDRESS_MAX_WIDTH)
+                    self.assertEqual(Path(dialog.directory().absolutePath()), long_directory)
+                    dialog.hide()
+
+    def test_long_history_popups_stay_within_address_width_and_navigate_full_path(self):
+        long_directory = self.root / ('history_' + 'a' * 48) / ('nested_' + 'b' * 48) / '尾部历史目录'
+        long_directory.mkdir(parents=True)
+        for theme in ('dark', 'light'):
+            apply_theme(self.runtime, theme)
+            for popup_kind in ('arrow', 'first_click'):
+                with self.subTest(theme=theme, popup_kind=popup_kind):
+                    PathFileDialog._recent_directories = [str(long_directory)]
+                    dialog = self.make_dialog('directory')
+                    accepted = QSignalSpy(dialog.accepted)
+                    if popup_kind == 'arrow':
+                        dialog.address_combo.showPopup()
+                        view = dialog.address_combo.view()
+                    else:
+                        dialog.focus_address()
+                        dialog._show_address_history()
+                        view = dialog._history_completer.popup()
+                    self.runtime.processEvents()
+                    self.assertLessEqual(view.window().width(), dialog.address_combo.width() + 2)
+                    index = next(view.model().index(row, 0) for row in range(view.model().rowCount())
+                                 if Path(view.model().index(row, 0).data()) == long_directory)
+                    self.assertEqual(Path(index.data(Qt.ItemDataRole.ToolTipRole)), long_directory)
+                    self.assertEqual(view.textElideMode(), Qt.TextElideMode.ElideLeft)
+                    QTest.mouseMove(view.viewport(), view.visualRect(index).center())
+                    QTest.qWait(QApplication.doubleClickInterval() + 10)
+                    QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton,
+                                     pos=view.visualRect(index).center())
+                    self.runtime.processEvents()
+                    self.assertEqual(Path(dialog.directory().absolutePath()), long_directory)
+                    self.assertEqual(Path(dialog.address_edit.text()), long_directory)
+                    self.assertEqual(accepted.count(), 0)
+                    dialog.hide()
 
     def test_mouse_history_selection_navigates_without_accepting_dialog(self):
         for popup_kind in ('arrow', 'first_click'):
