@@ -4,9 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
-
-# ==================== 界面适配参数设置区 ====================
-FILE_DIALOG_OPTIONS = QFileDialog.Option.DontUseNativeDialog
+from ui.qt.file_dialog import PathFileDialog
 
 
 class Value:
@@ -105,23 +103,42 @@ class FileDialogs:
     def _filter(types):
         return ';;'.join(f'{name} ({patterns})' for name, patterns in types or [])
 
+    @staticmethod
+    def _choose(dialog):
+        try:
+            if dialog.exec() == QFileDialog.DialogCode.Accepted:
+                paths = dialog.selectedFiles()
+                return paths[0] if paths else ''
+            return ''
+        finally:
+            # 模态窗口退出后释放原生控件，避免隐藏窗口随主窗口持续累积。
+            dialog.deleteLater()
+
     @classmethod
     def askopenfilename(cls, parent=None, title='打开文件', initialdir='', filetypes=None, **kwargs):
-        return QFileDialog.getOpenFileName(parent, title, initialdir, cls._filter(filetypes),
-                                          options=FILE_DIALOG_OPTIONS)[0]
+        dialog = PathFileDialog(parent, title, initialdir, cls._filter(filetypes))
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        return cls._choose(dialog)
 
     @classmethod
     def asksaveasfilename(cls, parent=None, title='保存文件', initialdir='', initialfile='',
                           filetypes=None, defaultextension='', **kwargs):
-        path = QFileDialog.getSaveFileName(parent, title, str(Path(initialdir) / initialfile),
-                                          cls._filter(filetypes), options=FILE_DIALOG_OPTIONS)[0]
+        dialog = PathFileDialog(parent, title, initialdir, cls._filter(filetypes))
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix(defaultextension.lstrip('.'))
+        if initialfile:
+            dialog.selectFile(initialfile)
+        path = cls._choose(dialog)
         if path and defaultextension and not Path(path).suffix:
             path += defaultextension
         return path
 
-    @staticmethod
-    def askdirectory(parent=None, title='选择目录', initialdir='', **kwargs):
-        return QFileDialog.getExistingDirectory(parent, title, initialdir, options=FILE_DIALOG_OPTIONS)
+    @classmethod
+    def askdirectory(cls, parent=None, title='选择目录', initialdir='', **kwargs):
+        dialog = PathFileDialog(parent, title, initialdir)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly)
+        return cls._choose(dialog)
 
 
 filedialog = FileDialogs

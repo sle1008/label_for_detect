@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
+from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QEvent
 from PySide6.QtGui import QColor, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyledItemDelegate, QStyle
@@ -496,6 +496,299 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(labels(LABEL_MODE_FULL), ['#1 person', '#2 deer 0.81'])
         canvas.show_video_frame(item._pil_image, item.annotations)
         self.assertEqual(labels(LABEL_MODE_FULL), ['person 1.00', 'deer 0.81'])
+
+    def test_duplicate_groups_show_all_classes_and_black_text_white_outline_notice(self):
+        from ui.qt.canvas import BOX_LINE_WIDTH, DUPLICATE_BOX_EXTRA_WIDTH
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(40, 65, 120, 155, 0, 'deer', .92),
+                            BBox(41, 66, 121, 156, 1, 'person', .81),
+                            BBox(220, 80, 280, 150, 0, 'deer')]
+        canvas = self.app._canvas
+        canvas._pointer = canvas._hover = None
+        drawn, borders, notices = [], [], []
+
+        class RecordingPainter(QPainter):
+            def drawText(self, *args):
+                drawn.append(args[-1])
+                return super().drawText(*args)
+
+            def drawRect(self, *args):
+                borders.append(self.pen().widthF())
+                return super().drawRect(*args)
+
+            def drawPath(self, path):
+                notices.append((path.boundingRect(), self.pen().color(), self.brush().color()))
+                return super().drawPath(path)
+
+        with patch('ui.qt.canvas.QPainter', RecordingPainter):
+            canvas.grab()
+        self.assertEqual(canvas._get_duplicate_groups(item.annotations), ((0, 1),))
+        self.assertEqual(drawn, ['#3 deer', '#1 deer 0.92', '#2 person 0.81'])
+        self.assertEqual(borders, [BOX_LINE_WIDTH + DUPLICATE_BOX_EXTRA_WIDTH,
+                                   BOX_LINE_WIDTH + DUPLICATE_BOX_EXTRA_WIDTH, BOX_LINE_WIDTH])
+        self.assertEqual(len(notices), 2)
+        rect, outline, _ = notices[0]
+        _, _, fill = notices[1]
+        self.assertEqual(outline, QColor('#ffffff'))
+        self.assertEqual(fill, QColor('#000000'))
+        visible = canvas._frame_rect().intersected(QRectF(canvas.rect()))
+        self.assertTrue(visible.contains(rect))
+        self.assertGreater(rect.center().x(), visible.center().x())
+        self.assertFalse(item.is_dirty)
+        # 检查最终像素而非仅看画笔参数，白色描边不能覆盖黑色字芯。
+        for background in ('#000000', '#ffffff', '#808080'):
+            canvas.set_image(item, Image.new('RGB', (320, 200), background))
+            image = canvas.grab().toImage()
+            ratio = image.devicePixelRatioF()
+            region = rect.toAlignedRect()
+            colors = {image.pixelColor(round(x * ratio), round(y * ratio)).name()
+                      for x in range(region.left(), region.right() + 1)
+                      for y in range(region.top(), region.bottom() + 1)}
+            self.assertIn('#000000', colors)
+            self.assertIn('#ffffff', colors)
+
+    def test_duplicate_count_refreshes_after_delete_undo_move_and_image_switch(self):
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(40, 60, 120, 150, index % 2, 'deer' if index % 2 == 0 else 'person')
+                            for index in range(3)]
+        canvas = self.app._canvas
+        notices = []
+        original_notice = canvas._draw_duplicate_notice
+
+        def record_notice(painter, frame, count):
+            notices.append(count)
+            original_notice(painter, frame, count)
+
+        def count():
+            canvas.grab()
+            return notices[-1]
+
+        # 不让 Mock 记录并持有 QPainter，绘制结束后必须及时释放原生绘图资源。
+        with patch.object(canvas, '_draw_duplicate_notice', new=record_notice):
+            self.assertEqual(count(), 2)
+            item.annotations[1].is_selected = True
+            self.app._on_annotation_changed()
+            self.app._delete_selected()
+            self.assertEqual(count(), 1)
+            self.app._delete_selected()
+            self.assertEqual(count(), 0)
+            self.app._undo()
+            self.assertEqual(count(), 1)
+            self.app._undo()
+            self.assertEqual(count(), 2)
+            item.annotations[-1].move(150, 0)
+            self.assertEqual(count(), 1)
+            item.annotations[1].move(0, -50)
+            self.assertEqual(count(), 0)
+            # 几何变化即刻重算，不依赖持久化或 dirty 状态；切图也不残留提示。
+            item.annotations[1].move(0, 50)
+            self.assertEqual(count(), 1)
+            self.app._next_image()
+            self.wait(lambda: canvas._current_image is not None and canvas._current_image is not item)
+            self.assertEqual(count(), 0)
+
+    def test_duplicate_hints_follow_label_modes_rotation_zoom_and_video_frames(self):
+        from ui.canvas_state import LABEL_MODE_FULL, LABEL_MODE_COMPACT, LABEL_MODE_HIDDEN
+        from ui.qt.canvas import find_duplicate_groups
+        self.load_images()
+        item = self.app._project.current_image
+        item.annotations = [BBox(40, 60, 120, 150, 0, 'deer'),
+                            BBox(40, 60, 120, 150, 1, 'person')]
+        canvas = self.app._canvas
+        canvas._pointer = canvas._hover = None
+        drawn = []
+
+        class RecordingPainter(QPainter):
+            def drawText(self, *args):
+                drawn.append(args[-1])
+                return super().drawText(*args)
+
+        with patch('ui.qt.canvas.find_duplicate_groups', wraps=find_duplicate_groups) as detect, \
+                patch('ui.qt.canvas.QPainter', RecordingPainter):
+            for mode, expected in [(LABEL_MODE_FULL, ['#1 deer', '#2 person']),
+                                   (LABEL_MODE_COMPACT, ['#1 / #2']),
+                                   (LABEL_MODE_HIDDEN, [])]:
+                canvas.set_label_mode(mode)
+                drawn.clear()
+                canvas.grab()
+                self.assertEqual(drawn, expected)
+            self.assertEqual(detect.call_count, 1)
+            for rotated in (False, True):
+                for scale in (0.5, 1.5, 3.0):
+                    canvas._rotation_180 = rotated
+                    canvas._scale = scale
+                    canvas.grab()
+                    self.assertEqual(canvas._get_duplicate_groups(item.annotations), ((0, 1),))
+            self.assertEqual(detect.call_count, 1)
+            canvas.show_video_frame(item._pil_image, item.annotations)
+            drawn.clear()
+            canvas.grab()
+            self.assertEqual(drawn, ['#1 deer 1.00', '#2 person 1.00'])
+            canvas.show_video_frame(item._pil_image, [])
+            canvas.grab()
+            self.assertEqual(canvas._get_duplicate_groups([]), ())
+
+    def test_tab_cycles_only_current_duplicate_group_and_preserves_annotation_data(self):
+        self.load_images()
+        item = self.app._project.current_image
+        boxes = [BBox(40, 65, 120, 155, row % 2, 'deer' if row % 2 == 0 else 'person')
+                 for row in range(3)]
+        boxes.extend([BBox(200, 60, 270, 140, 0, 'deer'), BBox(200, 60, 270, 140, 1, 'person')])
+        item.annotations = boxes
+        canvas = self.app._canvas
+        canvas.setFocus()
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=self.canvas_point(80, 110))
+        self.assertEqual(item.get_selected_annotations(), [boxes[0]])
+        original = [(box.id, box.x1, box.y1, box.x2, box.y2, box.class_id, box.class_name) for box in boxes]
+        for expected in (1, 2, 0, 1):
+            QTest.keyClick(canvas, Qt.Key.Key_Tab)
+            self.assertEqual(item.get_selected_annotations(), [boxes[expected]])
+            self.assertIs(self.runtime.focusWidget(), canvas)
+            table = self.app._box_list_panel.table
+            self.assertEqual({index.row() for index in table.selectedIndexes()}, {expected})
+            panel = self.app._label_panel
+            self.assertEqual(panel._visible_labels[panel.list.currentRow()].class_id, boxes[expected].class_id)
+        self.assertFalse(item.is_dirty)
+        self.assertFalse(self.app._current_image_undo_manager().can_undo())
+        self.assertEqual([(box.id, box.x1, box.y1, box.x2, box.y2, box.class_id, box.class_name)
+                          for box in boxes], original)
+        # 搜索框和模态设置仍使用常规 Tab 焦点行为，不切换隐藏的画布选择。
+        search = self.app._label_panel.search
+        search.setFocus()
+        QTest.keyClick(search, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), [boxes[1]])
+        canvas.setFocus()
+        item.deselect_all()
+        boxes[3].is_selected = True
+        self.app._on_annotation_changed()
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), [boxes[4]])
+        QTest.keyClick(canvas, Qt.Key.Key_Delete)
+        self.assertNotIn(boxes[4], item.annotations)
+        self.app._undo()
+        self.assertEqual(item.get_selected_annotations(), [boxes[4]])
+        canvas.setFocus()
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), [boxes[3]])
+        boxes[3].move(100, 0)
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), [boxes[3]])
+        self.assertIsNot(self.runtime.focusWidget(), canvas)
+        item.deselect_all()
+        boxes[0].is_selected = boxes[1].is_selected = True
+        canvas.setFocus()
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), boxes[:2])
+        self.open_video()
+        canvas.setFocus()
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), boxes[:2])
+
+    def test_duplicate_label_click_selects_exact_instance_and_delete_undo_remains_correct(self):
+        self.load_images()
+        item = self.app._project.current_image
+        boxes = [BBox(40, 80, 120, 160, 0, 'deer'), BBox(40, 80, 120, 160, 1, 'person'),
+                 BBox(220, 80, 280, 150, 0, 'deer')]
+        item.annotations = boxes[:]
+        canvas = self.app._canvas
+
+        def label_point(box):
+            canvas.grab()
+            return next(rect.center().toPoint() for rect, annotation in canvas._label_regions if annotation is box)
+
+        for rotated in (False, True):
+            canvas._rotation_180 = rotated
+            point = label_point(boxes[1])
+            QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=point)
+            self.assertEqual(item.get_selected_annotations(), [boxes[1]])
+            self.assertFalse(item.is_dirty)
+        point = label_point(boxes[0])
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos=point)
+        self.assertEqual(item.get_selected_annotations(), boxes[:2])
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=label_point(boxes[1]))
+        QTest.keyClick(canvas, Qt.Key.Key_Delete)
+        self.assertEqual(item.annotations, [boxes[0], boxes[2]])
+        self.app._undo()
+        self.assertEqual(item.annotations, boxes)
+        self.assertEqual(item.get_selected_annotations(), [boxes[1]])
+        # 普通标签同样可以选中，点击文字不会意外绘制新框或改变框坐标。
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=label_point(boxes[2]))
+        self.assertEqual(item.get_selected_annotations(), [boxes[2]])
+        self.assertEqual((boxes[2].x1, boxes[2].y1, boxes[2].x2, boxes[2].y2), (220, 80, 280, 150))
+
+    def test_label_hit_does_not_override_selected_resize_handle(self):
+        self.load_images()
+        item = self.app._project.current_image
+        box = BBox(40, 80, 120, 160, 0, 'deer', is_selected=True)
+        item.annotations = [box]
+        canvas = self.app._canvas
+        canvas._scale = 1
+        canvas._offset_x = canvas._offset_y = 32
+        canvas.grab()
+        point = self.canvas_point(80, 80) - QPoint(0, 5)
+        self.assertIs(canvas._find_label(QPointF(point)), box)
+        canvas._pointer = QPointF(point)
+        canvas._update_pointer_cursor()
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.SizeVerCursor)
+        self.drag(point, self.canvas_point(80, 60))
+        self.assertAlmostEqual(box.y1, 60, delta=1)
+        self.assertEqual((box.x1, box.x2, box.y2), (40, 120, 160))
+        self.app._undo()
+        self.assertEqual(box.y1, 80)
+
+    def test_blank_image_tab_scope_stays_global_until_duplicate_box_is_clicked(self):
+        self.load_images()
+        item = self.app._project.current_image
+        boxes = [BBox(40, 80, 120, 160, 0, 'deer'), BBox(40, 80, 120, 160, 1, 'person'),
+                 BBox(220, 80, 280, 150, 0, 'deer')]
+        item.annotations = boxes[:]
+        canvas = self.app._canvas
+        blank = self.canvas_point(300, 180)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=blank)
+        self.assertEqual(item.get_selected_annotations(), [])
+        for expected in (0, 1, 2, 0):
+            QTest.keyClick(canvas, Qt.Key.Key_Tab)
+            self.assertEqual(item.get_selected_annotations(), [boxes[expected]])
+            self.assertIs(self.runtime.focusWidget(), canvas)
+        # 全局循环选中重复框时仍保持全局；只有用户点击才改为组内循环。
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=self.canvas_point(80, 110))
+        for expected in (1, 0, 1):
+            QTest.keyClick(canvas, Qt.Key.Key_Tab)
+            self.assertEqual(item.get_selected_annotations(), [boxes[expected]])
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=blank)
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), [boxes[0]])
+        self.assertFalse(item.is_dirty)
+        item.annotations = []
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=blank)
+        QTest.keyClick(canvas, Qt.Key.Key_Tab)
+        self.assertEqual(item.get_selected_annotations(), [])
+
+    def test_duplicate_label_width_uses_canvas_space_and_keeps_existing_row_height(self):
+        from ui.qt.canvas import DUPLICATE_TAG_ROW_HEIGHT
+        self.load_images()
+        item = self.app._project.current_image
+        names = ['kudu_greater_antelope', 'wildlife_species_' * 20]
+        item.annotations = [BBox(40, 80, 120, 160, index, name) for index, name in enumerate(names)]
+        canvas = self.app._canvas
+        canvas._scale = 0.4
+        canvas._offset_x = canvas._offset_y = 32
+        drawn = []
+
+        class RecordingPainter(QPainter):
+            def drawText(self, *args):
+                drawn.append(args[-1])
+                return super().drawText(*args)
+
+        with patch('ui.qt.canvas.QPainter', RecordingPainter):
+            canvas.grab()
+        self.assertEqual(drawn[0], '#1 ' + names[0])
+        self.assertTrue(drawn[1].startswith('#2 ' + names[1][:16]))
+        regions = [rect for rect, _ in canvas._label_regions]
+        self.assertEqual([rect.height() for rect in regions], [DUPLICATE_TAG_ROW_HEIGHT] * 2)
+        self.assertEqual(regions[1].top() - regions[0].top(), DUPLICATE_TAG_ROW_HEIGHT)
 
     def test_filtering_and_background_status_preserve_original_mapping(self):
         self.load_images()

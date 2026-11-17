@@ -30,6 +30,7 @@ MAIN_QUEUE_INTERVAL_MS = 16
 COMMAND_BUTTON_SPACING = 5
 INPUT_WIDGET_TYPES = (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox, QSlider)
 INPUT_GLOBAL_SHORTCUTS = {'Ctrl+S', 'Ctrl+Shift+S', 'Ctrl+O', 'Ctrl+Shift+O', 'Ctrl+G'}
+CANVAS_CYCLE_SHORTCUT = 'Tab'
 _application = None
 
 
@@ -352,6 +353,10 @@ class AnnotationApp(QMainWindow, ApplicationController):
                 key = QKeySequence(event.keyCombination()).toString(QKeySequence.SequenceFormat.PortableText)
                 if isinstance(focus, INPUT_WIDGET_TYPES) and key not in INPUT_GLOBAL_SHORTCUTS:
                     return False
+                # 画布按点击位置限定 Tab 循环范围，其余控件保留常规焦点导航。
+                if (focus is self._canvas and key == CANVAS_CYCLE_SHORTCUT
+                        and self._canvas.cycle_annotation_selection()):
+                    return True
                 if self._video_path and key in (',', '.'):
                     self._step_video_frame(-1 if key == ',' else 1)
                     return True

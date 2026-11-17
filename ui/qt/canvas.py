@@ -2,9 +2,10 @@
 
 import math
 from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import QPainter, QPen, QColor, QImage, QFont, QCursor, QPixmap
+from PySide6.QtGui import QPainter, QPainterPath, QPen, QColor, QImage, QFont, QCursor, QPixmap
 from PySide6.QtWidgets import QWidget
 from core.annotation import BBox
+from core.annotation_overlap import find_duplicate_groups
 from ui.canvas_state import CanvasMode, LABEL_MODE_CYCLE, LABEL_MODE_FULL, LABEL_MODE_COMPACT
 from ui.qt.bridge import VisibilityMixin, event_position
 from ui.qt.theme import theme_color
@@ -22,6 +23,16 @@ CROSS_CURSOR_CORE_WIDTH = 1
 # 选中框的黑色外描边与白色内线宽度按逻辑像素统一配置。
 SELECTED_BOX_OUTLINE_WIDTH = 5
 SELECTED_BOX_CORE_WIDTH = 2
+# 重复框使用细一档的强调边线和合并标签；提示仅绘制在预览，不写入标注。
+BOX_LINE_WIDTH = 1.7
+DUPLICATE_BOX_EXTRA_WIDTH = 1
+DUPLICATE_ACCENT = '#efb65e'
+DUPLICATE_TAG_BACKGROUND = '#18212c'
+DUPLICATE_TAG_ROW_HEIGHT = 22
+DUPLICATE_TAG_TEXT_PADDING = 32
+DUPLICATE_NOTICE_PIXEL_SIZE = 17
+DUPLICATE_NOTICE_OUTLINE_WIDTH = 3
+DUPLICATE_NOTICE_MARGIN = 12
 ROTATED_HANDLES = {'nw': 'se', 'ne': 'sw', 'sw': 'ne', 'se': 'nw',
                    'n': 's', 's': 'n', 'w': 'e', 'e': 'w'}
 # 相对的手柄共用一个缩放轴，旋转 180 度后仍使用相同的双向箭头。
@@ -62,6 +73,11 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         self._pointer = None
         self._hover = None
         self._context_menu = None
+        self._duplicate_geometry = None
+        self._duplicate_groups = ()
+        self._label_regions = []
+        self._label_press = None
+        self._tab_cycle_scope = None
         self._on_image_context_menu = app._on_canvas_image_context_menu
         self._on_video_context_menu = app._show_video_context_menu
         self._crosshair_cursor = self._create_crosshair_cursor()
@@ -118,6 +134,9 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
     def set_image(self, item, pil_image=None):
         self._video_mode = False
         self._press = None
+        self._label_press = None
+        self._label_regions = []
+        self._tab_cycle_scope = None
         if self._current_image is not item:
             self._rotation_180 = False
         self._current_image = item
@@ -133,6 +152,9 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
 
     def show_video_frame(self, image, annotations=None):
         self._video_mode = True
+        self._label_press = None
+        self._label_regions = []
+        self._tab_cycle_scope = None
         self._rotation_180 = False
         self._current_image = None
         self._source_pil_image = image
@@ -147,6 +169,9 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         self._video_mode = False
         self._rotation_180 = False
         self._preview = self._rubber = self._press = None
+        self._label_press = None
+        self._label_regions = []
+        self._tab_cycle_scope = None
         self._mode = CanvasMode.IDLE
         self.update()
 
@@ -220,7 +245,157 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         return QRectF(self._offset_x, self._offset_y, self._source_pil_image.width * self._scale,
                       self._source_pil_image.height * self._scale)
 
+    def _get_duplicate_groups(self, boxes):
+        geometry = tuple((box.x1, box.y1, box.x2, box.y2) for box in boxes)
+        if geometry != self._duplicate_geometry:
+            self._duplicate_groups = find_duplicate_groups(boxes)
+            self._duplicate_geometry = geometry
+        return self._duplicate_groups
+
+    def _select_annotation(self, box, toggle=False):
+        """画布各选择入口同步实例表和类别定位，选择本身不修改标注。"""
+        item = self._current_image
+        if self._video_mode or item is None or box not in item.annotations:
+            return
+        if not toggle:
+            item.deselect_all()
+        box.is_selected = not box.is_selected if toggle else True
+        self.app._on_annotation_changed()
+        self.update()
+
+    def _set_tab_cycle_scope(self, box, point):
+        """由点击位置确定循环范围；Tab 产生的选择不会改变此范围。"""
+        if box is None:
+            self._tab_cycle_scope = 'image' if self._frame_rect().contains(point) else None
+        else:
+            boxes = self._current_image.annotations
+            index = boxes.index(box)
+            self._tab_cycle_scope = ('duplicates' if any(index in group for group in self._get_duplicate_groups(boxes))
+                                     else None)
+
+    def cycle_annotation_selection(self):
+        if self._video_mode or self._current_image is None or self._press is not None:
+            return False
+        boxes = self._current_image.annotations
+        selected = [index for index, box in enumerate(boxes) if box.is_selected]
+        if self._tab_cycle_scope == 'image' and boxes:
+            target = (selected[-1] + 1) % len(boxes) if selected else 0
+            self._select_annotation(boxes[target])
+            return True
+        if len(selected) != 1:
+            return False
+        for group in self._get_duplicate_groups(boxes):
+            if selected[0] in group:
+                target = group[(group.index(selected[0]) + 1) % len(group)]
+                self._select_annotation(boxes[target])
+                return True
+        return False
+
+    def _find_label(self, point):
+        if self._video_mode or self._current_image is None:
+            return None
+        # 后绘制的标签位于上层，命中顺序应与实际显示保持一致。
+        for rect, box in reversed(self._label_regions):
+            if rect.contains(point) and box in self._current_image.annotations:
+                return box
+        return None
+
+    def _draw_duplicate_labels(self, painter, boxes, groups, visible_frame):
+        """每组标签集中显示，避免几乎重合的类别条彼此覆盖。"""
+        if visible_frame.isEmpty():
+            return
+        painter.save()
+        for group in groups:
+            expanded = (self._video_mode or self._label_mode == LABEL_MODE_FULL
+                        or any(boxes[index].is_selected or boxes[index] is self._hover for index in group))
+            rows = []
+            for index in group:
+                box = boxes[index]
+                if expanded:
+                    text = f'#{index + 1} {box.class_name}'
+                    if self._video_mode or box.confidence < 1:
+                        text += f' {box.confidence:.2f}'
+                    rows.append((text, box))
+            compact = (' / '.join(f'#{index + 1}' for index in group)
+                       if not expanded and self._label_mode == LABEL_MODE_COMPACT else '')
+            if not rows and not compact:
+                continue
+            painter.setFont(QFont('Microsoft YaHei UI', 9, QFont.Weight.DemiBold))
+            metrics = painter.fontMetrics()
+            # 标签可以利用图像旁的画布留白，文字宽度按实际字体测量，避免过早省略。
+            canvas_rect = QRectF(self.rect())
+            width = min(canvas_rect.width(), max(metrics.horizontalAdvance(text)
+                        for text in ([compact] if compact else [text for text, _ in rows]))
+                        + DUPLICATE_TAG_TEXT_PADDING)
+            height = DUPLICATE_TAG_ROW_HEIGHT * max(1, len(rows)) + 4
+            bounds = self._rect(boxes[group[0]])
+            for index in group[1:]:
+                bounds = bounds.united(self._rect(boxes[index]))
+            if not bounds.intersects(visible_frame):
+                continue
+            left = max(canvas_rect.left(), min(bounds.left(), canvas_rect.right() - width))
+            top = bounds.top() - height - 3
+            if top < visible_frame.top():
+                top = bounds.top() + 6
+            top = max(visible_frame.top(), min(top, visible_frame.bottom() - height))
+            panel = QRectF(left, top, width, height)
+            painter.setPen(QPen(QColor(DUPLICATE_ACCENT), 1))
+            painter.setBrush(QColor(DUPLICATE_TAG_BACKGROUND))
+            painter.drawRoundedRect(panel, 5, 5)
+            row = panel.adjusted(9, 2, -7, 0)
+            row.setHeight(DUPLICATE_TAG_ROW_HEIGHT)
+            if compact:
+                painter.setPen(QColor(DUPLICATE_ACCENT))
+                painter.drawText(row, Qt.AlignmentFlag.AlignVCenter,
+                                 metrics.elidedText(compact, Qt.TextElideMode.ElideRight, int(row.width())))
+                left = row.left()
+                for index in group:
+                    width = metrics.horizontalAdvance(f'#{index + 1}')
+                    hit = QRectF(left, row.top(), width, row.height()).intersected(row)
+                    if not hit.isEmpty():
+                        self._label_regions.append((hit, boxes[index]))
+                    left += width + metrics.horizontalAdvance(' / ')
+            for text, box in rows:
+                self._label_regions.append((QRectF(row), box))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(self.app._label_manager.get_color(box.class_id)))
+                painter.drawEllipse(QPointF(row.left() + 3, row.center().y()), 3, 3)
+                painter.setPen(QColor('#ffffff'))
+                painter.setFont(QFont('Microsoft YaHei UI', 9,
+                                     QFont.Weight.DemiBold if box.is_selected else QFont.Weight.Normal))
+                text_rect = row.adjusted(12, 0, 0, 0)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter,
+                                 painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight,
+                                                                 int(text_rect.width())))
+                row.translate(0, DUPLICATE_TAG_ROW_HEIGHT)
+        painter.restore()
+
+    def _draw_duplicate_notice(self, painter, visible_frame, count):
+        if not count or visible_frame.isEmpty():
+            return
+        painter.save()
+        font = QFont('Microsoft YaHei UI')
+        font.setPixelSize(DUPLICATE_NOTICE_PIXEL_SIZE)
+        font.setWeight(QFont.Weight.DemiBold)
+        text = QPainterPath()
+        text.addText(QPointF(), font, f'有{count}个重复框')
+        bounds = text.boundingRect()
+        # 提示贴合当前可见图像区域，缩放和平移后也不会跟随框被裁出画面。
+        text.translate(visible_frame.right() - DUPLICATE_NOTICE_MARGIN - bounds.right(),
+                       visible_frame.top() + DUPLICATE_NOTICE_MARGIN - bounds.top())
+        pen = QPen(QColor('#ffffff'), DUPLICATE_NOTICE_OUTLINE_WIDTH)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(text)
+        # 先描外边，再覆盖黑色字芯，避免白色笔画吞没较细的中文字体。
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor('#000000'))
+        painter.drawPath(text)
+        painter.restore()
+
     def paintEvent(self, event):
+        self._label_regions = []
         painter = QPainter(self)
         theme = self.app._config.ui_theme
         painter.fillRect(self.rect(), QColor(theme_color('canvas', theme)))
@@ -244,6 +419,9 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         painter.drawImage(frame_rect, self._qimage)
         painter.restore()
         boxes = self._video_annotations if self._video_mode else self._current_image.annotations
+        duplicate_groups = self._get_duplicate_groups(boxes)
+        duplicate_indices = {index for group in duplicate_groups for index in group}
+        visible_frame = frame_rect.intersected(QRectF(self.rect()))
         indexed_boxes = list(enumerate(boxes))
         if not self._video_mode:
             # 仅调整绘制顺序，保持实例序号和数据顺序，选中框最后覆盖显示。
@@ -258,7 +436,8 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
                 painter.drawRect(rect)
                 painter.setPen(QPen(QColor('#ffffff'), SELECTED_BOX_CORE_WIDTH))
             else:
-                painter.setPen(QPen(color, 1.7))
+                painter.setPen(QPen(color, BOX_LINE_WIDTH +
+                                    (DUPLICATE_BOX_EXTRA_WIDTH if index in duplicate_indices else 0)))
             painter.drawRect(rect)
             if selected:
                 painter.setBrush(QColor('#ffffff'))
@@ -277,15 +456,17 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
                 text = f'#{index + 1}'
             else:
                 text = ''
-            if text:
+            if text and index not in duplicate_indices:
                 painter.setFont(QFont('Microsoft YaHei UI', 9))
                 width = painter.fontMetrics().horizontalAdvance(text) + 12
                 tag = QRectF(rect.left(), max(0, rect.top() - 24), width, 22)
+                self._label_regions.append((tag, box))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(color)
                 painter.drawRoundedRect(tag, 3, 3)
                 painter.setPen(QColor('#ffffff'))
                 painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, text)
+        self._draw_duplicate_labels(painter, boxes, duplicate_groups, visible_frame)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor('#95b7f9'), 1.3, Qt.PenStyle.DashLine))
         if self._preview:
@@ -296,6 +477,8 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             painter.setPen(QPen(QColor(theme_color('crosshair', theme)), 0.7, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(self._pointer.x(), 0), QPointF(self._pointer.x(), self.height()))
             painter.drawLine(QPointF(0, self._pointer.y()), QPointF(self.width(), self._pointer.y()))
+        self._draw_duplicate_notice(painter, visible_frame,
+                                    sum(len(group) - 1 for group in duplicate_groups))
 
     def _update_pointer_cursor(self):
         if self._video_mode or not self._current_image or self._pointer is None:
@@ -305,6 +488,8 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         handle, _ = self._find_handle(self._pointer)
         if handle:
             self.setCursor(RESIZE_CURSORS[handle])
+        elif self._find_label(self._pointer):
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         elif not self._frame_rect().contains(self._pointer):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         else:
@@ -317,6 +502,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         self._press_image = self.canvas_to_image(point.x(), point.y())
         self._right = event.button() == Qt.MouseButton.RightButton
         self._originals = []
+        self._label_press = None
         if event.button() == Qt.MouseButton.MiddleButton or (self._space and not self._video_mode):
             self._mode = CanvasMode.PANNING
             self._pan_offsets = (self._offset_x, self._offset_y)
@@ -330,12 +516,19 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
         if self._right or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             self._mode = CanvasMode.SELECTING
             return
+        # 点击前刷新标签命中区域，避免刚缩放、切图或删框后沿用旧位置。
+        self.repaint()
         self._handle, self._box = self._find_handle(point)
         if self._handle:
             self._mode = CanvasMode.RESIZING
             self._originals = [(self._box, (self._box.x1, self._box.y1, self._box.x2, self._box.y2))]
             return
+        self._label_press = self._find_label(point)
+        if self._label_press:
+            self._mode = CanvasMode.IDLE
+            return
         self._box = self._find_box(point)
+        self._set_tab_cycle_scope(self._box, point)
         if self._box and self._box.is_selected:
             self._mode = CanvasMode.MOVING
             self._originals = [(box, (box.x1, box.y1, box.x2, box.y2))
@@ -346,12 +539,15 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
     def mouseMoveEvent(self, event):
         point = event.position()
         self._pointer = point
-        self._hover = self._find_box(point)
+        self._hover = self._find_label(point) or self._find_box(point)
         if self._press is None:
             self._update_pointer_cursor()
             self.update()
             return
         distance = (point - self._press).manhattanLength()
+        if self._label_press is not None:
+            self.update()
+            return
         if self._mode == CanvasMode.PANNING:
             delta = point - self._press
             self._offset_x, self._offset_y = self._pan_offsets[0] + delta.x(), self._pan_offsets[1] + delta.y()
@@ -377,8 +573,16 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
 
     def mouseReleaseEvent(self, event):
         point, press = event.position(), self._press
+        label_press, self._label_press = self._label_press, None
         mode = self._mode
         self._press = None
+        if label_press is not None:
+            if (press is not None and (point - press).manhattanLength() <= DRAG_THRESHOLD
+                    and self._find_label(point) is label_press):
+                self._set_tab_cycle_scope(label_press, point)
+                self._select_annotation(label_press, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+            self._mode = CanvasMode.IDLE
+            return
         if mode == CanvasMode.PANNING:
             self._mode = CanvasMode.IDLE
             return
@@ -475,4 +679,5 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             self.app._on_annotation_changed()
         self._mode = CanvasMode.IDLE
         self._preview = self._rubber = self._press = None
+        self._label_press = None
         self.update()
