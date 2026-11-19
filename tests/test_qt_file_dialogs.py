@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QUrl
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
@@ -91,6 +91,59 @@ class QtFileDialogTests(unittest.TestCase):
                 return
             QTest.qWait(5)
         self.fail('文件选择器模型或编辑状态等待超时')
+
+    def test_default_desktop_shortcut_navigates_without_accepting_in_all_modes(self):
+        desktop = self.root / '系统桌面 Desktop'
+        desktop.mkdir()
+        desktop_url = QUrl.fromLocalFile(str(desktop))
+        for theme in ('dark', 'light'):
+            apply_theme(self.runtime, theme)
+            for mode in MODES:
+                with self.subTest(theme=theme, mode=mode):
+                    with patch('ui.qt.file_dialog.QStandardPaths.writableLocation', return_value=str(desktop)):
+                        dialog = self.make_dialog(mode)
+                    original_urls = [url for url in dialog.sidebarUrls() if url != desktop_url]
+                    try:
+                        self.assertEqual(dialog.sidebarUrls().count(desktop_url), 1)
+                        self.assertEqual(Path(dialog.directory().absolutePath()), self.initial)
+                        sidebar = dialog.findChild(QListView, 'sidebar')
+                        index = sidebar.model().index(dialog.sidebarUrls().index(desktop_url), 0)
+                        accepted = QSignalSpy(dialog.accepted)
+                        QTest.mouseClick(sidebar.viewport(), Qt.MouseButton.LeftButton,
+                                         pos=sidebar.visualRect(index).center())
+                        self.wait_for(lambda: Path(dialog.directory().absolutePath()) == desktop)
+                        self.assertEqual(Path(dialog.address_edit.text()), desktop)
+                        self.assertTrue(dialog.isVisible())
+                        self.assertEqual(accepted.count(), 0)
+                        if mode == 'save':
+                            self.assertEqual(Path(dialog.selectedFiles()[0]).name, 'preview.mp4')
+                    finally:
+                        dialog.setSidebarUrls(original_urls)
+                        dialog.hide()
+
+    def test_desktop_shortcut_preserves_bookmarks_and_skips_duplicates_or_missing_paths(self):
+        dialog = self.make_dialog('directory')
+        original_urls = dialog.sidebarUrls()
+        bookmarks = [QUrl('file:'), QUrl.fromLocalFile(str(self.initial)),
+                     QUrl.fromLocalFile(str(self.target))]
+        try:
+            dialog.setSidebarUrls(bookmarks)
+            with patch('ui.qt.file_dialog.QStandardPaths.writableLocation', return_value=str(self.target)):
+                dialog._ensure_desktop_shortcut()
+            self.assertEqual(dialog.sidebarUrls(), bookmarks)
+            with patch('ui.qt.file_dialog.QStandardPaths.writableLocation', return_value=str(self.root)):
+                dialog._ensure_desktop_shortcut()
+                dialog._ensure_desktop_shortcut()
+            self.assertEqual(dialog.sidebarUrls(), [bookmarks[0], QUrl.fromLocalFile(str(self.root)),
+                                                    *bookmarks[1:]])
+            expected = dialog.sidebarUrls()
+            for missing in ('', str(self.root / '不存在的桌面')):
+                with self.subTest(desktop=missing), patch(
+                        'ui.qt.file_dialog.QStandardPaths.writableLocation', return_value=missing):
+                    dialog._ensure_desktop_shortcut()
+                    self.assertEqual(dialog.sidebarUrls(), expected)
+        finally:
+            dialog.setSidebarUrls(original_urls)
 
     def test_address_row_uses_available_space_and_blank_menu_controls_views(self):
         for theme in ('dark', 'light'):

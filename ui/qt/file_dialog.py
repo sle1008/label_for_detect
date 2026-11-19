@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from PySide6.QtCore import QDir, QEvent, QFile, QItemSelectionModel, Qt, QTimer, QUrl
+from PySide6.QtCore import QDir, QEvent, QFile, QItemSelectionModel, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QCompleter, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
@@ -112,6 +112,7 @@ class PathFileDialog(QFileDialog):
         self.layout().addLayout(navigation, 0, 0, 1, self.layout().columnCount())
         for name in FILE_VIEW_BUTTONS:
             self.findChild(QToolButton, name).hide()
+        self._ensure_desktop_shortcut()
         # 侧栏为图标和完整中文名称保留空间，避免翻译后被自动压得过窄。
         self.findChild(QWidget, 'sidebar').setMinimumWidth(FILE_DIALOG_SIDEBAR_MIN_WIDTH)
         # 行内重命名沿用列表行高，只缩小编辑框内边距，保证字形完整。
@@ -131,6 +132,21 @@ class PathFileDialog(QFileDialog):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(self.focus_address)
             self._address_shortcuts.append(shortcut)
+
+    def _ensure_desktop_shortcut(self):
+        """保留现有快捷位置，补入系统桌面入口并避免重复。"""
+        # 使用系统路径，兼容重定向或 OneDrive 桌面；路径不可用时沿用原侧栏。
+        desktop = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        if not desktop or not QDir(desktop).exists():
+            return
+        urls = self.sidebarUrls()
+        desktop_key = os.path.normcase(os.path.normpath(desktop))
+        if any(url.isLocalFile() and
+               os.path.normcase(os.path.normpath(url.toLocalFile())) == desktop_key for url in urls):
+            return
+        # 桌面置于靠前位置，其他系统入口与用户快捷位置保持原有顺序。
+        urls.insert(1, QUrl.fromLocalFile(desktop))
+        self.setSidebarUrls(urls)
 
     def _file_context_menu(self, view, point):
         """文件项保留原生重命名和删除行为，空白处也可新建目录或切换视图。"""
