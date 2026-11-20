@@ -934,8 +934,8 @@ class ApplicationController:
             ):
                 self._defer_weights_load_until_images_ready(self._config.last_weights_file)
 
-        self._threshold = self._config.confidence_threshold
-        self._threshold_slider.set(self._threshold)
+        self._threshold_input.setValue(self._config.confidence_threshold)
+        self._threshold = self._threshold_input.value()
         if self._config.label_mode in LABEL_MODE_CYCLE:
             self._canvas.set_label_mode(self._config.label_mode)
             self._label_mode_var.set(self._config.label_mode)

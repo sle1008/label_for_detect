@@ -350,12 +350,22 @@ class QtFileDialogTests(unittest.TestCase):
                         self.assertEqual([Path(path) for path in dialog.selectedFiles()], [self.label_file])
 
     def test_toolbar_navigation_updates_address_after_pasting(self):
-        dialog = self.make_dialog('directory')
-        self.paste_address(dialog, str(self.target))
-        QTest.mouseClick(dialog.findChild(QToolButton, 'toParentButton'), Qt.MouseButton.LeftButton)
-        self.runtime.processEvents()
-        self.assertEqual(Path(dialog.directory().absolutePath()), self.root)
-        self.assertEqual(Path(dialog.address_edit.text()), self.root)
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                apply_theme(self.runtime, theme)
+                dialog = self.make_dialog('directory')
+                back, forward, parent = [dialog.findChild(QToolButton, name) for name in
+                                         ('backButton', 'forwardButton', 'toParentButton')]
+                self.assertFalse(back.isEnabled())
+                self.assertFalse(forward.isEnabled())
+                self.paste_address(dialog, str(self.target))
+                for button, path in ((back, self.initial), (forward, self.target), (parent, self.root)):
+                    self.assertTrue(button.isEnabled())
+                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                    self.runtime.processEvents()
+                    self.assertEqual(Path(dialog.directory().absolutePath()), path)
+                    self.assertEqual(Path(dialog.address_edit.text()), path)
+                dialog.hide()
 
     def test_go_button_and_save_overwrite_confirmation_remain_separate(self):
         dialog = self.make_dialog('save')

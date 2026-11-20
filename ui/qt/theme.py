@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QIcon, QPixmap, QPalette
 from PySide6.QtCore import Qt, QPointF, QRectF
+from ui.qt.window_chrome import sync_title_bars
 
 # ==================== 主题参数设置区 ====================
 BACKGROUND = '#101318'
@@ -69,9 +70,15 @@ QPushButton#danger { color: #ff939b; background: #3c242d; border-color: #63343f;
 QPushButton:disabled, QToolButton:disabled { color: #586578; background: #191f28; border-color: #26303d; }
 QFrame#commands QPushButton { padding: 6px 8px; }
 QToolButton#compact { padding: 2px 6px; }
+QToolButton#backButton, QToolButton#forwardButton, QToolButton#toParentButton { padding: 4px; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #121720; border: 1px solid #344052;
     border-radius: 6px; padding: 7px 10px; selection-background-color: #355a96; }
-QLineEdit:focus, QComboBox:focus { border-color: #5d91ff; }
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border-color: #5d91ff; }
+QDoubleSpinBox#confidenceInput { padding: 5px 6px; }
+QDoubleSpinBox#confidenceInput::up-button, QDoubleSpinBox#confidenceInput::down-button {
+    background: #222a35; border-left: 1px solid #344052; }
+QDoubleSpinBox#confidenceInput::up-button:hover, QDoubleSpinBox#confidenceInput::down-button:hover {
+    background: #2b3850; }
 QComboBox::drop-down { border: none; width: 24px; }
 QComboBox QAbstractItemView { background: #222a35; selection-background-color: #334f7b; }
 QListView, QTableView, QTreeView { background: transparent; border: none; outline: none;
@@ -144,8 +151,11 @@ QListView::item:selected, QTableView::item:selected, QTreeView::item:selected,
 QMenu::item:selected, QMenuBar::item:selected, QPushButton:checked, QToolButton:checked {{
     background: {SELECTION_BACKGROUND}; color: {SELECTION_TEXT}; }}'''
     arrow = (ASSET_DIRECTORY / f'chevron-{theme}.svg').as_posix()
+    up_arrow = (ASSET_DIRECTORY / f'chevron-up-{theme}.svg').as_posix()
     stylesheet += f'''QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 10px; }}
 QToolButton#filter::menu-indicator {{ image: url("{arrow}"); }}
+QDoubleSpinBox#confidenceInput::up-arrow {{ image: url("{up_arrow}"); width: 10px; height: 10px; }}
+QDoubleSpinBox#confidenceInput::down-arrow {{ image: url("{arrow}"); width: 10px; height: 10px; }}
 QLabel#toast {{ background: {theme_color('surface', theme)}; color: {theme_color('text', theme)};
     border: 1px solid #648ac2; border-radius: 8px; padding: 10px 20px; }}
 QLabel#ready {{ color: {theme_color('success', theme)}; font-size: 10px; }}'''
@@ -158,6 +168,7 @@ QLabel#ready {{ color: {theme_color('success', theme)}; font-size: 10px; }}'''
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(SELECTION_TEXT))
     application.setPalette(palette)
     application.setStyleSheet(stylesheet)
+    sync_title_bars(application, theme_color('background', theme), theme_color('text', theme))
     for widget in application.allWidgets():
         name = widget.property('annotationIcon')
         if name:
@@ -195,6 +206,7 @@ def icon(name, color=None, size=20):
         'box': [(4, 4, 20, 4), (20, 4, 20, 20), (20, 20, 4, 20), (4, 20, 4, 4)],
         'prev': [(15, 5, 8, 12), (8, 12, 15, 19)],
         'next': [(9, 5, 16, 12), (16, 12, 9, 19)],
+        'up': [(5, 15, 12, 8), (12, 8, 19, 15)],
         'undo': [(9, 5, 4, 10), (4, 10, 9, 15), (4, 10, 15, 10), (15, 10, 20, 15), (20, 15, 20, 19)],
         'redo': [(15, 5, 20, 10), (20, 10, 15, 15), (20, 10, 9, 10), (9, 10, 4, 15), (4, 15, 4, 19)],
         'refresh': [(4, 9, 7, 4), (7, 4, 16, 4), (16, 4, 20, 9), (20, 9, 20, 4),

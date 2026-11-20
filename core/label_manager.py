@@ -5,6 +5,9 @@ from typing import List, Dict, Optional
 
 from utils.colors import get_color_for_class
 
+# ==================== 标签参数设置区 ====================
+DEFAULT_LABEL_THRESHOLD = 0.5
+
 
 @dataclass
 class LabelDef:
@@ -12,11 +15,19 @@ class LabelDef:
     class_id: int
     name: str
     color: str = ''
-    threshold: float = 0.5
+    threshold: float = DEFAULT_LABEL_THRESHOLD
     
     def __post_init__(self):
         if not self.color:
             self.color = get_color_for_class(self.class_id)
+
+    def matches_query(self, query: str, note: str = '') -> bool:
+        """纯数字匹配完整类别编号，其余文本匹配类别名称或备注。"""
+        query = query.strip().casefold()
+        if query.isascii() and query.isdecimal():
+            # 用十进制编号字符串比较，前导零和任意长度的输入都可以处理。
+            return (query.lstrip('0') or '0') == str(self.class_id)
+        return query in self.name.casefold() or query in note.casefold()
 
 
 class LabelManager:

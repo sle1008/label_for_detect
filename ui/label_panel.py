@@ -144,12 +144,8 @@ class LabelPanel(ttk.LabelFrame):
                 break
 
     def _label_matches_query(self, label: LabelDef, query: str) -> bool:
-        """Match display search against the original name or its optional note."""
-        if query in label.name.casefold():
-            return True
-        if self._note_store:
-            return query in self._note_store.get(label.name).casefold()
-        return False
+        note = self._note_store.get(label.name) if self._note_store else ''
+        return label.matches_query(query, note)
 
     def highlight_class(self, class_id: int):
         """Highlight a class in the list without triggering selection callback."""

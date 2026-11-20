@@ -2,12 +2,13 @@
 
 import os
 from pathlib import Path
-from PySide6.QtCore import QDir, QEvent, QFile, QItemSelectionModel, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtCore import QDir, QEvent, QFile, QItemSelectionModel, QSize, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QCompleter, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QListView,
     QMessageBox, QPushButton, QSizePolicy, QStyledItemDelegate, QToolButton, QMenu, QWidget,
 )
+from ui.qt.theme import set_button_icon
 
 # ==================== 文件选择参数设置区 ====================
 # Qt 控件继承应用主题，地址输入与文件名输入分别处理。
@@ -29,6 +30,8 @@ SIDEBAR_SYSTEM_LOCATION_NAMES = {
     QStandardPaths.StandardLocation.MoviesLocation: '视频',
 }
 FILE_VIEW_BUTTONS = ('newFolderButton', 'listModeButton', 'detailModeButton')
+FILE_NAVIGATION_ICONS = {'backButton': 'prev', 'forwardButton': 'next', 'toParentButton': 'up'}
+FILE_NAVIGATION_ICON_SIZE = 20
 FILE_TYPE_COLUMN = 2
 
 
@@ -141,6 +144,14 @@ class PathFileDialog(QFileDialog):
         navigation.setStretchFactor(address, 1)
         address.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.layout().addLayout(navigation, 0, 0, 1, self.layout().columnCount())
+        # 更换显示图标，按钮启用状态与导航仍由 Qt 管理。
+        for name, graphic in FILE_NAVIGATION_ICONS.items():
+            button = self.findChild(QToolButton, name)
+            button.setIconSize(QSize(FILE_NAVIGATION_ICON_SIZE, FILE_NAVIGATION_ICON_SIZE))
+            set_button_icon(button, graphic)
+            # Qt 切换历史目录时不发出 directoryEntered，点击后同步自定义地址栏。
+            if name in ('backButton', 'forwardButton'):
+                button.clicked.connect(self._sync_address)
         for name in FILE_VIEW_BUTTONS:
             self.findChild(QToolButton, name).hide()
         self._ensure_desktop_shortcut()

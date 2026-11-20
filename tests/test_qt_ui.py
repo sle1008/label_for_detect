@@ -15,7 +15,7 @@ from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QEvent
 from PySide6.QtGui import QColor, QEnterEvent, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyledItemDelegate, QStyle
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QPushButton, QStyledItemDelegate, QStyle, QStyleOptionSpinBox
 
 # ==================== Qt 回归参数设置区 ====================
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +27,7 @@ VIDEO_FPS = 20
 from core.annotation import BBox
 from core.project import ImageFilter, Project, DIRECTORY_PREVIEW_COUNT
 from io_ops.annotation_status import preferred_annotation_txt_path
+from io_ops.pre_annotator import INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS
 from ui.qt.app import AnnotationApp, ensure_application
 from ui.qt.bridge import Menu
 from ui.qt import dialogs
@@ -476,7 +477,7 @@ class QtWorkbenchTests(unittest.TestCase):
         move_pointer(self.canvas_point(50, 50))
         self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.SizeAllCursor)
         move_pointer(QPoint(0, 0))
-        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.BitmapCursor)
         self.open_video()
         move_pointer(QPoint(canvas.width() // 2, canvas.height() // 2))
         self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
@@ -896,6 +897,65 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(item.annotations[0].class_name, 'person')
         self.app._undo()
         self.assertEqual(item.annotations[0].class_name, 'deer')
+
+    def test_label_search_by_exact_id_preserves_name_and_note_search(self):
+        (self.images / 'classes.txt').write_text('0: deer\n1: person\n10: number_1\n', encoding='utf-8')
+        self.app._label_note_store.set('number_1', '测试 01')
+        self.load_images()
+        item = self.app._project.current_image
+        box = BBox(20, 20, 80, 80, 0, 'deer', is_selected=True)
+        item.annotations = [box]
+        panel = self.app._label_panel
+        for query, expected in (('00001', [1]), ('000', [0]), ('010', [10]), ('02', []),
+                                ('NUMBER_1', [10]), ('测试', [10])):
+            with self.subTest(query=query):
+                panel.search.setText(query)
+                self.assertEqual([label.class_id for label in panel._visible_labels], expected)
+                self.assertEqual(panel.list.count(), len(expected))
+                self.assertEqual(box.class_id, 0)
+        panel.search.setText('00001')
+        QTest.mouseClick(panel.list.viewport(), Qt.MouseButton.LeftButton,
+                         pos=panel.list.visualItemRect(panel.list.item(0)).center())
+        self.assertEqual(box.class_id, 1)
+
+    def test_confidence_input_and_inference_menu_keep_their_workflows(self):
+        spin = self.app._threshold_input
+        engine = self.app.load_model.parentWidget()
+        self.assertIs(spin.parentWidget(), engine)
+        self.assertEqual(engine.findChildren(QComboBox), [])
+        self.assertEqual(self.app._right_paned.count(), 2)
+        label = next(widget for widget in engine.findChildren(QLabel) if widget.buddy() is spin)
+        self.app._config.confidence_threshold = 0.20
+        self.app._restore_session()
+        self.assertEqual(spin.text(), '0.20')
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                self.app._set_theme(theme)
+                self.runtime.processEvents()
+                self.assertLess(self.app.load_model.geometry().right(), label.geometry().left())
+                self.assertLess(label.geometry().right(), spin.geometry().left())
+                spin.setFocus()
+                spin.selectAll()
+                QTest.keyClicks(spin, '0.25')
+                QTest.keyClick(spin, Qt.Key.Key_Return)
+                self.assertAlmostEqual(self.app._threshold, 0.25)
+                option = QStyleOptionSpinBox()
+                spin.initStyleOption(option)
+                for control, value in ((QStyle.SubControl.SC_SpinBoxUp, 0.26),
+                                       (QStyle.SubControl.SC_SpinBoxDown, 0.25)):
+                    rect = spin.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, option, control, spin)
+                    QTest.mouseClick(spin, Qt.MouseButton.LeftButton, pos=rect.center())
+                    self.assertAlmostEqual(self.app._threshold, value)
+        spin.stepDown()
+        self.app._save_session()
+        self.assertAlmostEqual(self.app._config_manager.load().confidence_threshold, 0.24)
+
+        annotation_menu = next(action.menu() for action in self.app.menuBar().actions() if action.text() == '标注')
+        actions = {action.text(): action for action in annotation_menu.actions()}
+        for mode in (INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS):
+            actions[mode].trigger()
+            self.assertTrue(actions[mode].isChecked())
+            self.assertEqual(self.app._pre_annotator._requested_inference_mode, mode)
 
     def test_label_click_current_row_applies_to_mixed_canvas_selection(self):
         (self.images / 'classes.txt').write_text('0: bird\n1: cat\n', encoding='utf-8')

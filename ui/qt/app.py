@@ -4,24 +4,23 @@ import queue
 import re
 import sys
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer, QEvent, QSize, QRect, QPoint
+from PySide6.QtCore import Qt, QTimer, QEvent, QSize, QRect, QPoint, QLocale
 from PySide6.QtGui import QFont, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QToolButton, QSplitter, QLineEdit, QTextEdit, QPlainTextEdit,
-    QComboBox, QAbstractSpinBox, QSizePolicy, QSlider, QLayout,
+    QComboBox, QAbstractSpinBox, QDoubleSpinBox, QSizePolicy, QSlider, QLayout,
 )
 from ui.qt.controller import ApplicationController
 from ui.qt.state import initialize_state
 from ui.qt.canvas import AnnotationCanvas
-from ui.qt.panels import (ThumbnailPanel, LabelPanel, BoxListPanel, ThresholdSlider,
+from ui.qt.panels import (ThumbnailPanel, LabelPanel, BoxListPanel,
                            VideoControls, StatusBar, FilterButton, section)
 from ui.qt.theme import FONT_FAMILY, FONT_SIZE, icon, apply_theme, set_button_icon
 from ui.qt.dialogs import showerror
 from ui.qt.localization import install_chinese_translations
 from utils.paths import get_icon_path
 from utils.dpi import configure_ui_dpi
-from io_ops.pre_annotator import DEFAULT_INFERENCE_MODE, INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS
 
 # ==================== 工作台参数设置区 ====================
 DEFAULT_WINDOW_SIZE = (1600, 960)
@@ -29,6 +28,15 @@ MINIMUM_WINDOW_SIZE = (1100, 680)
 DEFAULT_PANE_WIDTHS = (270, 940, 350)
 MAIN_QUEUE_INTERVAL_MS = 16
 COMMAND_BUTTON_SPACING = 5
+# 与原置信度滑杆共用有效区间和调整精度。
+CONFIDENCE_INPUT_RANGE = (0.01, 0.99)
+CONFIDENCE_INPUT_STEP = 0.01
+CONFIDENCE_INPUT_DECIMALS = 2
+# 为步进按钮、边框和文字边距保留空间，输入框按当前字体计算宽度。
+CONFIDENCE_INPUT_EXTRA_WIDTH = 40
+INFERENCE_CONTROL_GAP = 12
+RIGHT_PANE_DEFAULT_HEIGHTS = (430, 230)
+LEGACY_CONFIDENCE_PANE_HEIGHT = 52
 INPUT_WIDGET_TYPES = (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox, QSlider)
 INPUT_GLOBAL_SHORTCUTS = {'Ctrl+S', 'Ctrl+Shift+S', 'Ctrl+O', 'Ctrl+Shift+O', 'Ctrl+G'}
 CANVAS_CYCLE_SHORTCUT = 'Tab'
@@ -163,7 +171,6 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._setup_menus()
         self.class_filter.setMenu(self._label_filter_menu.widget)
         self._label_filter_var.callbacks.append(lambda text: self.class_filter.setText(str(text)))
-        self._inference_mode_var.callbacks.append(self.inference_combo.setCurrentText)
         self._setup_canvas_context_menu()
         self._rebuild_label_filter_menu()
         apply_theme(QApplication.instance(), self._config.ui_theme)
@@ -296,14 +303,28 @@ class AnnotationApp(QMainWindow, ApplicationController):
         set_button_icon(load_model, 'spark')
         load_model.clicked.connect(self._load_weights)
         engine_row.addWidget(load_model)
-        self.inference_combo = QComboBox()
-        self.inference_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.inference_combo.setMinimumWidth(0)
-        self.inference_combo.setToolTip('选择推理分支：one-to-one / one-to-many+NMS')
-        self.inference_combo.addItems([INFERENCE_MODE_ONE_TO_ONE, INFERENCE_MODE_ONE_TO_MANY_NMS])
-        self.inference_combo.setCurrentText(DEFAULT_INFERENCE_MODE)
-        self.inference_combo.textActivated.connect(self._set_pre_annotation_inference_mode)
-        engine_row.addWidget(self.inference_combo, 1)
+        engine_row.addSpacing(INFERENCE_CONTROL_GAP)
+        threshold_label = QLabel('置信度阈值')
+        threshold_label.setObjectName('sectionTitle')
+        self._threshold_input = QDoubleSpinBox()
+        self._threshold_input.setObjectName('confidenceInput')
+        self._threshold_input.setLocale(QLocale.c())
+        self._threshold_input.setDecimals(CONFIDENCE_INPUT_DECIMALS)
+        self._threshold_input.setRange(*CONFIDENCE_INPUT_RANGE)
+        self._threshold_input.setSingleStep(CONFIDENCE_INPUT_STEP)
+        self._threshold_input.setKeyboardTracking(False)
+        self._threshold_input.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        value_text = self._threshold_input.textFromValue(self._threshold_input.maximum())
+        value_width = self._threshold_input.fontMetrics().horizontalAdvance(value_text)
+        self._threshold_input.setMaximumWidth(value_width + CONFIDENCE_INPUT_EXTRA_WIDTH)
+        self._threshold_input.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._threshold_input.setValue(self._threshold)
+        self._threshold_input.valueChanged.connect(self._on_threshold_changed)
+        threshold_label.setBuddy(self._threshold_input)
+        self._threshold_input.setAccessibleName(threshold_label.text())
+        engine_row.addWidget(threshold_label)
+        engine_row.addWidget(self._threshold_input)
+        engine_row.addStretch()
         model_layout.addLayout(engine_row)
         right_layout.addWidget(model_frame)
         self._right_paned = QSplitter(Qt.Orientation.Vertical)
@@ -311,15 +332,13 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._right_paned.setHandleWidth(10)
         self._label_panel = LabelPanel(self)
         self._right_paned.addWidget(self._label_panel)
-        self._threshold_slider = ThresholdSlider(self)
-        self._threshold_slider.setFixedHeight(52)
-        self._right_paned.addWidget(self._threshold_slider)
         self._box_list_panel = BoxListPanel(self)
         self._right_paned.addWidget(self._box_list_panel)
-        self._right_paned.setSizes([430, 52, 230])
+        category_height, boxes_height = RIGHT_PANE_DEFAULT_HEIGHTS
         saved_sashes = self._config.right_pane_sash_positions
-        if len(saved_sashes) >= 2:
-            self._right_paned.setSizes([max(240, saved_sashes[0]), 52, 230])
+        if saved_sashes:
+            category_height = max(240, saved_sashes[0])
+        self._right_paned.setSizes([category_height, boxes_height])
         right_layout.addWidget(self._right_paned, 1)
         self._paned.addWidget(right)
         left_width = self._config.left_panel_width or DEFAULT_PANE_WIDTHS[0]
@@ -433,8 +452,9 @@ class AnnotationApp(QMainWindow, ApplicationController):
         return self._paned.sizes()[1]
 
     def _current_right_pane_sash_positions(self):
-        sizes = self._right_paned.sizes()
-        return [sizes[0], sizes[0] + sizes[1]]
+        category_height = self._right_paned.sizes()[0]
+        # 配置与旧版共用，第二个位置留给旧版的置信度面板。
+        return [category_height, category_height + LEGACY_CONFIDENCE_PANE_HEIGHT]
 
     def _show_center_toast(self, text, duration_ms=1000):
         self._toast.setText(text)

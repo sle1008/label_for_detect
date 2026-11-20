@@ -276,8 +276,8 @@ class LabelPanel(QFrame):
         layout.setContentsMargins(14, 16, 14, 12)
         layout.addLayout(section('标签类别', 'CLASSES'))
         self.search = QLineEdit()
-        self.search.setToolTip('搜索标签类别或备注（S）')
-        self.search.setPlaceholderText('搜索类别或中文备注…')
+        self.search.setToolTip('搜索类别、备注或编号（S）')
+        self.search.setPlaceholderText('搜索类别、备注或编号…')
         self.search.textChanged.connect(lambda: self.refresh())
         layout.addWidget(self.search)
         self.list = QListWidget()
@@ -299,10 +299,9 @@ class LabelPanel(QFrame):
 
     def refresh(self, select_class_id=None):
         current = self._label_manager.current_class_id if select_class_id is None else select_class_id
-        query = self.search.text().strip().casefold()
+        query = self.search.text().strip()
         self._visible_labels = [label for label in self._label_manager.labels_for_display()
-                                if query in label.name.casefold() or
-                                query in self.app._label_note_store.get(label.name).casefold()]
+                                if not query or label.matches_query(query, self.app._label_note_store.get(label.name))]
         self.list.blockSignals(True)
         self.list.clear()
         for index, label in enumerate(self._visible_labels):
@@ -465,31 +464,6 @@ class BoxListPanel(QFrame):
         menu.add_command(label='修改类别', command=lambda: self.app._label_panel.focus_search(True))
         point = self.table.viewport().mapToGlobal(position)
         menu.tk_popup(point.x(), point.y())
-
-
-class ThresholdSlider(QFrame):
-    def __init__(self, app):
-        super().__init__()
-        self.setObjectName('panel')
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        heading = QLabel('置信度阈值')
-        heading.setObjectName('sectionTitle')
-        layout.addWidget(heading)
-        self.value = QLabel(f'{app._threshold:.2f}')
-        self.value.setObjectName('badge')
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setMinimumWidth(60)
-        self.slider.setToolTip('预标注置信度阈值')
-        self.slider.setRange(1, 99)
-        self.slider.setValue(round(app._threshold * 100))
-        self.slider.valueChanged.connect(lambda value: (self.value.setText(f'{value/100:.2f}'), app._on_threshold_changed(value / 100)))
-        layout.addWidget(self.slider, 1)
-        layout.addWidget(self.value)
-
-    def set(self, value):
-        self.slider.setValue(round(value * 100))
-        self.value.setText(f'{self.slider.value() / 100:.2f}')
 
 
 class TimelineSlider(QSlider):
