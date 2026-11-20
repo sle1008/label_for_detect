@@ -36,11 +36,15 @@ class AnnotationOverlapTests(unittest.TestCase):
         boxes[1].move(-10, 0)
         self.assertEqual(find_duplicate_groups(boxes), ((0, 1),))
 
-    def test_ninety_percent_boundary_is_inclusive_and_lower_overlap_is_not_duplicate(self):
+    def test_eighty_five_percent_boundary_is_inclusive_and_lower_overlap_is_not_duplicate(self):
         original = self.box((0, 0, 100, 100))
-        for width, expected in ((89.9, ()), (90, ((0, 1),)), (90.1, ((0, 1),))):
+        for width, expected in ((84.9, ()), (85, ((0, 1),)), (85.1, ((0, 1),))):
             with self.subTest(width=width):
                 self.assertEqual(find_duplicate_groups([original, self.box((0, 0, width, 100))]), expected)
+
+    def test_screenshot_boxes_at_eighty_nine_percent_are_flagged(self):
+        boxes = [self.box((0, 200, 12, 249)), self.box((0, 201, 11, 249))]
+        self.assertEqual(find_duplicate_groups(boxes), ((0, 1),))
 
     def test_invalid_boxes_and_empty_lists_do_not_produce_duplicates(self):
         self.assertEqual(find_duplicate_groups([]), ())

@@ -19,6 +19,7 @@ FONT_SIZE = 10
 SELECTION_BACKGROUND = '#4b78b4'
 SELECTION_TEXT = '#ffffff'
 CLASS_LIST_FONT_SIZE = 14
+INFERENCE_CONTROL_FONT_SIZE = 14
 SPLITTER_HOVER_COLOR = '#477df0'
 # 高亮只占分隔条中央的 20%，拖动命中范围仍由各控件的尺寸决定。
 SPLITTER_HOVER_START = 0.4
@@ -145,6 +146,8 @@ def apply_theme(application, theme):
     # 选中态使用独立色值，避免主题映射造成白字与浅色背景对比不足。
     stylesheet += f'''
 QListWidget#classList {{ font-size: {CLASS_LIST_FONT_SIZE}px; }}
+QPushButton#modelWeightsButton, QLabel#confidenceLabel {{
+    font-size: {INFERENCE_CONTROL_FONT_SIZE}px; font-weight: normal; }}
 QListView, QTableView, QTreeView, QComboBox QAbstractItemView, QLineEdit, QTextEdit, QPlainTextEdit {{
     selection-background-color: {SELECTION_BACKGROUND}; selection-color: {SELECTION_TEXT}; }}
 QListView::item:selected, QTableView::item:selected, QTreeView::item:selected,

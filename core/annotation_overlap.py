@@ -3,8 +3,8 @@
 import math
 
 # ==================== 重复框识别参数设置区 ====================
-# 高交并比用于区分重复定位与正常遮挡；同类及不同类别使用相同规则。
-DUPLICATE_IOU_THRESHOLD = 0.90
+# 使用统一的高重合度阈值区分重复定位与普通遮挡，不受类别影响。
+DUPLICATE_IOU_THRESHOLD = 0.85
 
 
 def find_duplicate_groups(boxes, threshold=DUPLICATE_IOU_THRESHOLD):

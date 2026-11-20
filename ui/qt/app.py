@@ -34,7 +34,8 @@ CONFIDENCE_INPUT_STEP = 0.01
 CONFIDENCE_INPUT_DECIMALS = 2
 # 为步进按钮、边框和文字边距保留空间，输入框按当前字体计算宽度。
 CONFIDENCE_INPUT_EXTRA_WIDTH = 40
-INFERENCE_CONTROL_GAP = 12
+INFERENCE_CONTROL_GAP = 16
+RIGHT_PANE_MINIMUM_WIDTH = 310
 RIGHT_PANE_DEFAULT_HEIGHTS = (430, 230)
 LEGACY_CONFIDENCE_PANE_HEIGHT = 52
 INPUT_WIDGET_TYPES = (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QAbstractSpinBox, QSlider)
@@ -285,7 +286,6 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self._video_controls.hide()
         self._workspace_paned.addWidget(center)
         right = QWidget()
-        right.setMinimumWidth(310)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         model_frame = QFrame()
@@ -298,14 +298,15 @@ class AnnotationApp(QMainWindow, ApplicationController):
         self.model_name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         model_layout.addWidget(self.model_name)
         engine_row = QHBoxLayout()
-        self.load_model = load_model = QPushButton('选择权重…')
+        self.load_model = load_model = QPushButton('选择模型权重...')
+        load_model.setObjectName('modelWeightsButton')
         load_model.setToolTip('选择模型权重（.pt / .onnx / .engine / .trt）')
         set_button_icon(load_model, 'spark')
         load_model.clicked.connect(self._load_weights)
         engine_row.addWidget(load_model)
         engine_row.addSpacing(INFERENCE_CONTROL_GAP)
         threshold_label = QLabel('置信度阈值')
-        threshold_label.setObjectName('sectionTitle')
+        threshold_label.setObjectName('confidenceLabel')
         self._threshold_input = QDoubleSpinBox()
         self._threshold_input.setObjectName('confidenceInput')
         self._threshold_input.setLocale(QLocale.c())
@@ -328,6 +329,8 @@ class AnnotationApp(QMainWindow, ApplicationController):
         model_layout.addLayout(engine_row)
         right_layout.addWidget(model_frame)
         self._right_paned = QSplitter(Qt.Orientation.Vertical)
+        # 保留列表的最小宽度，让外层侧栏也能按推理控件的文字宽度计算最小尺寸。
+        self._right_paned.setMinimumWidth(RIGHT_PANE_MINIMUM_WIDTH)
         self._right_paned.setChildrenCollapsible(False)
         self._right_paned.setHandleWidth(10)
         self._label_panel = LabelPanel(self)
