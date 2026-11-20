@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QPoint, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
@@ -108,6 +108,9 @@ class QtFileDialogTests(unittest.TestCase):
                         self.assertEqual(Path(dialog.directory().absolutePath()), self.initial)
                         sidebar = dialog.findChild(QListView, 'sidebar')
                         index = sidebar.model().index(dialog.sidebarUrls().index(desktop_url), 0)
+                        option = QStyleOptionViewItem()
+                        sidebar.itemDelegate().initStyleOption(option, index)
+                        self.assertEqual(option.text, '桌面')
                         accepted = QSignalSpy(dialog.accepted)
                         QTest.mouseClick(sidebar.viewport(), Qt.MouseButton.LeftButton,
                                          pos=sidebar.visualRect(index).center())
@@ -142,6 +145,34 @@ class QtFileDialogTests(unittest.TestCase):
                         'ui.qt.file_dialog.QStandardPaths.writableLocation', return_value=missing):
                     dialog._ensure_desktop_shortcut()
                     self.assertEqual(dialog.sidebarUrls(), expected)
+        finally:
+            dialog.setSidebarUrls(original_urls)
+
+    def test_sidebar_localizes_system_paths_added_after_opening(self):
+        locations = QStandardPaths.StandardLocation
+        documents = self.root / 'Redirected' / 'Documents'
+        downloads = self.root / 'Redirected' / 'Downloads'
+        project_downloads = self.initial / 'Downloads'
+        for path in (documents, downloads, project_downloads):
+            path.mkdir(parents=True)
+        system_paths = {locations.DocumentsLocation: str(documents), locations.DownloadLocation: str(downloads)}
+        with patch('ui.qt.file_dialog.QStandardPaths.writableLocation',
+                   side_effect=lambda location: system_paths.get(location, '')):
+            dialog = self.make_dialog('directory')
+        original_urls = dialog.sidebarUrls()
+        sidebar = dialog.findChild(QListView, 'sidebar')
+        try:
+            # 系统目录和同名项目目录在弹窗打开后加入书签，原路径仍用于点击导航。
+            bookmarks = [QUrl.fromLocalFile(str(path)) for path in (downloads, project_downloads, documents)]
+            dialog.setSidebarUrls([*original_urls, *bookmarks])
+            for url, expected in zip(bookmarks, ('下载', 'Downloads', '文档')):
+                index = sidebar.model().index(dialog.sidebarUrls().index(url), 0)
+                option = QStyleOptionViewItem()
+                sidebar.itemDelegate().initStyleOption(option, index)
+                self.assertEqual(option.text, expected)
+            index = sidebar.model().index(dialog.sidebarUrls().index(bookmarks[0]), 0)
+            QTest.mouseClick(sidebar.viewport(), Qt.MouseButton.LeftButton, pos=sidebar.visualRect(index).center())
+            self.wait_for(lambda: Path(dialog.address_edit.text()) == downloads)
         finally:
             dialog.setSidebarUrls(original_urls)
 

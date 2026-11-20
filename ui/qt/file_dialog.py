@@ -5,8 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import QDir, QEvent, QFile, QItemSelectionModel, QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QComboBox, QCompleter, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSizePolicy, QStyledItemDelegate, QToolButton, QMenu, QWidget,
+    QComboBox, QCompleter, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QLineEdit, QListView,
+    QMessageBox, QPushButton, QSizePolicy, QStyledItemDelegate, QToolButton, QMenu, QWidget,
 )
 
 # ==================== 文件选择参数设置区 ====================
@@ -20,6 +20,14 @@ ADDRESS_MIN_CHARACTERS = 24
 FILE_DIALOG_DEFAULT_WIDTH = 740
 FILE_DIALOG_DEFAULT_HEIGHT = 488
 FILE_DIALOG_SIDEBAR_MIN_WIDTH = 112
+SIDEBAR_SYSTEM_LOCATION_NAMES = {
+    QStandardPaths.StandardLocation.DesktopLocation: '桌面',
+    QStandardPaths.StandardLocation.DocumentsLocation: '文档',
+    QStandardPaths.StandardLocation.DownloadLocation: '下载',
+    QStandardPaths.StandardLocation.PicturesLocation: '图片',
+    QStandardPaths.StandardLocation.MusicLocation: '音乐',
+    QStandardPaths.StandardLocation.MoviesLocation: '视频',
+}
 FILE_VIEW_BUTTONS = ('newFolderButton', 'listModeButton', 'detailModeButton')
 FILE_TYPE_COLUMN = 2
 
@@ -44,6 +52,29 @@ class FileEntryDelegate(QStyledItemDelegate):
             # Windows 外壳提供的类型名称不经过 Qt 翻译，显示时按目录和扩展名处理。
             suffix = Path(model.fileName(index)).suffix.lstrip('.').upper()
             option.text = '文件夹' if model.isDir(index) else (f'{suffix} 文件' if suffix else '文件')
+
+
+class SidebarLocationDelegate(QStyledItemDelegate):
+    """本地化系统快捷位置的名称，保留 Qt 侧栏模型中的实际路径。"""
+
+    def __init__(self, sidebar, sidebar_urls):
+        super().__init__(sidebar)
+        self._sidebar_urls = sidebar_urls
+        self._display_names = {}
+        for location, name in SIDEBAR_SYSTEM_LOCATION_NAMES.items():
+            path = QStandardPaths.writableLocation(location)
+            if path:
+                # 系统位置指向同一路径时，优先采用排在前面的常用名称。
+                self._display_names.setdefault(os.path.normcase(os.path.normpath(path)), name)
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        # 从当前侧栏取 URL，拖入、移除或重排快捷位置后仍按实际路径匹配。
+        urls = self._sidebar_urls()
+        row = index.row()
+        if 0 <= row < len(urls) and urls[row].isLocalFile():
+            path = urls[row].toLocalFile()
+            option.text = self._display_names.get(os.path.normcase(os.path.normpath(path)), option.text)
 
 
 class PathFileDialog(QFileDialog):
@@ -113,8 +144,10 @@ class PathFileDialog(QFileDialog):
         for name in FILE_VIEW_BUTTONS:
             self.findChild(QToolButton, name).hide()
         self._ensure_desktop_shortcut()
+        sidebar = self.findChild(QListView, 'sidebar')
+        sidebar.setItemDelegate(SidebarLocationDelegate(sidebar, self.sidebarUrls))
         # 侧栏为图标和完整中文名称保留空间，避免翻译后被自动压得过窄。
-        self.findChild(QWidget, 'sidebar').setMinimumWidth(FILE_DIALOG_SIDEBAR_MIN_WIDTH)
+        sidebar.setMinimumWidth(FILE_DIALOG_SIDEBAR_MIN_WIDTH)
         # 行内重命名沿用列表行高，只缩小编辑框内边距，保证字形完整。
         self.setStyleSheet('QAbstractItemView QLineEdit { padding: 0px 3px; min-height: 0px; }')
         for name in ('listView', 'treeView'):

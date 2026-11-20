@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, QEvent
-from PySide6.QtGui import QColor, QMouseEvent, QPainter
+from PySide6.QtGui import QColor, QEnterEvent, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyledItemDelegate, QStyle
 
@@ -295,6 +295,67 @@ class QtWorkbenchTests(unittest.TestCase):
         self.drag(self.canvas_point(100, 100), self.canvas_point(130, 120))
         self.assertAlmostEqual(box.x2, 130, delta=2)
 
+    def test_crosshair_guides_cover_image_preview_margin(self):
+        self.load_images()
+        canvas = self.app._canvas
+        canvas._scale = 0.5
+        canvas._offset_x = canvas._offset_y = 32
+        margin = QPoint(12, 18)
+        self.assertFalse(canvas._frame_rect().contains(QPointF(margin)))
+        guides = []
+
+        class GuidePainter(QPainter):
+            def drawLine(self, *args):
+                if self.pen().style() == Qt.PenStyle.DashLine:
+                    guides.append(args)
+                return super().drawLine(*args)
+
+        # 测试窗口放在屏幕外，直接发送进入事件，不依赖系统鼠标位置。
+        enter = QEnterEvent(QPointF(margin), QPointF(canvas.mapTo(self.app, margin)),
+                            QPointF(canvas.mapToGlobal(margin)))
+        QApplication.sendEvent(canvas, enter)
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.BitmapCursor)
+        with patch('ui.qt.canvas.QPainter', GuidePainter):
+            canvas.grab()
+            self.assertEqual(guides, [(QPointF(12, 0), QPointF(12, canvas.height())),
+                                      (QPointF(0, 18), QPointF(canvas.width(), 18))])
+            guides.clear()
+            QApplication.sendEvent(canvas, QEvent(QEvent.Type.Leave))
+            canvas.grab()
+            self.assertEqual(guides, [])
+
+    def test_drag_from_image_margin_keeps_raw_preview_but_clamps_saved_box(self):
+        self.load_images()
+        canvas = self.app._canvas
+        item = self.app._project.current_image
+        canvas._scale = 0.5
+        canvas._offset_x = canvas._offset_y = 32
+        start, margin, inside = QPoint(12, 18), QPoint(24, 28), QPoint(82, 62)
+        button = Qt.MouseButton.LeftButton
+
+        # 完全在同侧留白内的拖动不会形成有效标注。
+        self.drag(start, margin)
+        self.assertEqual(item.annotations, [])
+
+        for rotated, expected in ((False, (0, 0, 100, 60)), (True, (220, 140, 320, 200))):
+            with self.subTest(rotated=rotated):
+                canvas._rotation_180 = rotated
+                QTest.mousePress(canvas, button, pos=start)
+                QTest.mouseMove(canvas, margin, 5)
+                self.assertEqual(canvas._preview, QRectF(QPointF(start), QPointF(margin)))
+                QTest.mouseMove(canvas, inside, 5)
+                self.assertEqual(canvas._preview, QRectF(QPointF(start), QPointF(inside)))
+                QTest.mouseRelease(canvas, button, pos=inside)
+                box = item.annotations[-1]
+                self.assertEqual((box.x1, box.y1, box.x2, box.y2), expected)
+        self.assertTrue(self.app._save_current_annotations())
+        lines = preferred_annotation_txt_path(item.path).read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            cx, cy, width, height = map(float, line.split()[1:])
+            self.assertGreaterEqual(min(cx - width / 2, cy - height / 2), -1e-6)
+            self.assertLessEqual(max(cx + width / 2, cy + height / 2), 1 + 1e-6)
+
     def test_box_navigation_buttons_keep_selection_and_video_read_only(self):
         self.load_images()
         item = self.app._project.current_image
@@ -465,7 +526,7 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.SizeHorCursor)
         box.is_selected = False
         move_pointer(QPointF(*canvas.image_to_canvas(0, 100)) - QPointF(6, 0))
-        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.ArrowCursor)
+        self.assertEqual(canvas.cursor().shape(), Qt.CursorShape.BitmapCursor)
         self.assertFalse(item.is_dirty)
 
     def test_selected_box_black_white_outline_and_foreground_layer(self):

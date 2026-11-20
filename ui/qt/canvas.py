@@ -473,7 +473,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             painter.drawRect(self._preview)
         if self._rubber:
             painter.drawRect(self._rubber)
-        if self._pointer and not self._video_mode and self._frame_rect().contains(self._pointer):
+        if self._pointer is not None and not self._video_mode:
             painter.setPen(QPen(QColor(theme_color('crosshair', theme)), 0.7, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(self._pointer.x(), 0), QPointF(self._pointer.x(), self.height()))
             painter.drawLine(QPointF(0, self._pointer.y()), QPointF(self.width(), self._pointer.y()))
@@ -481,7 +481,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
                                     sum(len(group) - 1 for group in duplicate_groups))
 
     def _update_pointer_cursor(self):
-        if self._video_mode or not self._current_image or self._pointer is None:
+        if self._video_mode or self._qimage is None or not self._current_image or self._pointer is None:
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
         # 光标与按下时共用手柄命中范围，包含图片边缘外可拖拽的少量留白。
@@ -490,10 +490,21 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             self.setCursor(RESIZE_CURSORS[handle])
         elif self._find_label(self._pointer):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
-        elif not self._frame_rect().contains(self._pointer):
-            self.setCursor(Qt.CursorShape.ArrowCursor)
         else:
             self.setCursor(Qt.CursorShape.SizeAllCursor if self._hover else self._crosshair_cursor)
+
+    def _track_pointer(self, point):
+        # 鼠标按住拖出画布时仍会收到移动事件，辅助线只跟踪画布内的位置。
+        inside = QRectF(self.rect()).contains(point)
+        self._pointer = point if inside else None
+        self._hover = (self._find_label(point) or self._find_box(point)) if inside else None
+
+    def enterEvent(self, event):
+        self._track_pointer(event.position())
+        if self._press is None:
+            self._update_pointer_cursor()
+        self.update()
+        super().enterEvent(event)
 
     def mousePressEvent(self, event):
         self.setFocus()
@@ -538,8 +549,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
 
     def mouseMoveEvent(self, event):
         point = event.position()
-        self._pointer = point
-        self._hover = self._find_label(point) or self._find_box(point)
+        self._track_pointer(point)
         if self._press is None:
             self._update_pointer_cursor()
             self.update()
@@ -560,6 +570,7 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
                 self._current_image.deselect_all()
                 self._mode = CanvasMode.DRAWING
             if self._mode == CanvasMode.DRAWING:
+                # 拖框预览保留鼠标的实际起止位置，松手后才按原图边界裁切。
                 self._preview = QRectF(self._press, point).normalized()
             elif self._mode == CanvasMode.MOVING:
                 for box, original in self._originals:
@@ -667,8 +678,9 @@ class AnnotationCanvas(VisibilityMixin, QWidget):
             self.update()
 
     def leaveEvent(self, event):
-        self._pointer = None
+        self._pointer = self._hover = None
         self.update()
+        super().leaveEvent(event)
 
     def cancel_or_deselect(self):
         if self._mode != CanvasMode.IDLE:
